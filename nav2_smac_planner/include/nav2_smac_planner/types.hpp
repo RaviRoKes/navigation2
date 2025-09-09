@@ -22,6 +22,8 @@
 
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "nav2_util/node_utils.hpp"
+#include "nav2_smac_planner/direction_map.hpp"
+
 
 namespace nav2_smac_planner
 {
@@ -46,6 +48,16 @@ struct SearchInfo
   std::string lattice_filepath;
   bool cache_obstacle_heuristic;
   bool allow_reverse_expansion;
+    // --- Direction-map guidance ---
+  bool use_direction_map = false;
+  double direction_attract_weight = 0.0;   // distance-to-corridor bias
+  double direction_heading_weight = 0.0;   // heading alignment bias
+  double direction_heading_decay = 0.0;    // exp decay factor (per cell)
+
+  // // Optional extra bias model if you’re using it elsewhere
+  // double _heading_bias_weight = 0.0;
+  // double _heading_bias_exponent = 1.0;
+  std::shared_ptr<nav2_smac_planner::DirectionMap> direction_map;
 };
 
 /**

@@ -18,6 +18,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <mutex>
 
 #include "nav2_smac_planner/a_star.hpp"
 #include "nav2_smac_planner/smoother.hpp"
@@ -32,6 +33,7 @@
 #include "nav2_util/lifecycle_node.hpp"
 #include "nav2_util/node_utils.hpp"
 #include "tf2/utils.h"
+#include "nav2_smac_planner/direction_map.hpp"
 
 namespace nav2_smac_planner
 {
@@ -121,6 +123,19 @@ protected:
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr _raw_plan_publisher;
   std::mutex _mutex;
   rclcpp_lifecycle::LifecycleNode::WeakPtr _node;
+
+  //data
+  std::shared_ptr<nav2_smac_planner::DirectionMap> direction_map_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr direction_map_sub_;
+  
+  std::string direction_map_topic_{"direction_map"};
+  bool use_direction_map_{false};
+  double direction_attract_weight_{0.0};
+  double direction_heading_weight_{0.0};
+  double direction_heading_decay_{0.0};
+  // double _heading_bias_weight{0.3};
+  // double _heading_bias_exponent{1.5};
+  void directionMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
 
   // Dynamic parameters handler
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr _dyn_params_handler;

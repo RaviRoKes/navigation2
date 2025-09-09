@@ -21,12 +21,15 @@
 #include <queue>
 #include <limits>
 #include <utility>
+#include <cmath>
 
 #include "ompl/base/ScopedState.h"
 #include "ompl/base/spaces/DubinsStateSpace.h"
 #include "ompl/base/spaces/ReedsSheppStateSpace.h"
 
 #include "nav2_smac_planner/node_hybrid.hpp"
+#include "nav2_smac_planner/direction_map.hpp"
+#include "rclcpp/rclcpp.hpp"
 
 using namespace std::chrono;  // NOLINT
 
@@ -43,6 +46,7 @@ nav2_costmap_2d::Costmap2D * NodeHybrid::sampled_costmap = nullptr;
 CostmapDownsampler NodeHybrid::downsampler;
 ObstacleHeuristicQueue NodeHybrid::obstacle_heuristic_queue;
 
+SearchInfo* NodeHybrid::search_info = nullptr;
 // Each of these tables are the projected motion models through
 // time and space applied to the search on the current node in
 // continuous map-coordinates (e.g. not meters but partial map cells)
@@ -337,6 +341,78 @@ float NodeHybrid::getTraversalCost(const NodePtr & child)
   if (child->getMotionPrimitiveIndex() > 2) {
     // reverse direction
     travel_cost *= motion_table.reverse_penalty;
+  }
+  // Direction map integration
+  auto si = NodeHybrid::search_info;
+  auto dir_map = (si) ? si->direction_map : nullptr;
+
+  if (si && si->use_direction_map && dir_map && dir_map->isValid())
+  {
+    // NodeHybrid pose is in costmap-cell coordinates (continuous)
+    const int mx = static_cast<int>(std::lround(child->pose.x));
+    const int my = static_cast<int>(std::lround(child->pose.y));
+
+    float theta_ref; // preferred heading (radians) from direction map
+    if (dir_map->getPreferredTheta(static_cast<unsigned int>(mx),
+                                   static_cast<unsigned int>(my),
+                                   theta_ref))
+    {
+      // Compute the actual motion heading between parent and child (radians)
+      const float dx = child->pose.x - this->pose.x;
+      const float dy = child->pose.y - this->pose.y;
+      const float theta_motion = std::atan2(dy, dx);
+
+      // Normalize angle to [-pi, pi]
+      auto normAngle = [](float a)
+      {
+        a = std::fmod(a, 2.0f * static_cast<float>(M_PI));
+        if (a > M_PI)
+          a -= 2.0f * static_cast<float>(M_PI);
+        if (a <= -M_PI)
+          a += 2.0f * static_cast<float>(M_PI);
+        return a;
+      };
+
+      const float dtheta = normAngle(theta_motion - theta_ref);
+
+      // Decay (use exponential if configured, else 1/(1+d))
+      float decay = 1.0f;
+      if (si->direction_heading_weight > 0.0)
+      {
+        if (si->direction_heading_decay > 0.0)
+        {
+          const float d_cells = dir_map->distanceCells(mx, my);
+          if (std::isfinite(d_cells))
+          {
+            decay = std::exp(-static_cast<float>(si->direction_heading_decay) * d_cells);
+          }
+        }
+        else
+        {
+          const float d_cells = dir_map->distanceCells(mx, my);
+          if (std::isfinite(d_cells))
+          {
+            decay = 1.0f / (1.0f + std::max(0.0f, d_cells));
+          }
+        }
+        travel_cost += static_cast<float>(si->direction_heading_weight) * decay * dtheta * dtheta;
+      }
+
+      // (Optional) Debug logging
+      // RCLCPP_INFO(rclcpp::get_logger("DirectionCost"),
+      //   "mx=%u my=%u theta_ref=%.2f theta_motion=%.2f dtheta=%.2f decay=%.2f add=%.3f",
+      //   mx, my, theta_ref, theta_motion, dtheta, decay,
+      //   static_cast<float>(si->direction_heading_weight) * decay * dtheta * dtheta);
+    }
+
+    // If you also want a "corridor attraction" term, add it here
+    // once your DirectionMap provides a distance function.
+    // if (si->direction_attract_weight > 0.0) {
+    //   float d_cells = dir_map->distanceCells(mx, my);
+    //   if (std::isfinite(d_cells)) {
+    //     travel_cost += static_cast<float>(si->direction_attract_weight) * d_cells;
+    //   }
+    // }
   }
 
   return travel_cost;
@@ -672,6 +748,25 @@ void NodeHybrid::getNeighbors(
   Coordinates initial_node_coords;
   const MotionPoses motion_projections = motion_table.getProjections(this);
 
+  // --- Hard gating threshold (radians). Make this a param later (allow maximum deviation from pref direc)
+  constexpr float kMaxHeadingDevRad = static_cast<float>(M_PI) / 6.0f; // 30°
+
+  // Grab direction map (if provided)
+  auto si = NodeHybrid::search_info;
+  std::shared_ptr<nav2_smac_planner::DirectionMap> dir_map =
+      (si) ? si->direction_map : nullptr;
+
+  // Helper to normalize angle to [-pi, pi]
+  auto normAngle = [](float a)
+  {
+    a = std::fmod(a, 2.0f * static_cast<float>(M_PI));
+    if (a > M_PI)
+      a -= 2.0f * static_cast<float>(M_PI);
+    if (a <= -M_PI)
+      a += 2.0f * static_cast<float>(M_PI);
+    return a;
+  };
+
   for (unsigned int i = 0; i != motion_projections.size(); i++) {
     index = NodeHybrid::getIndex(
       static_cast<unsigned int>(motion_projections[i]._x),
@@ -688,6 +783,40 @@ void NodeHybrid::getNeighbors(
           motion_projections[i]._x,
           motion_projections[i]._y,
           motion_projections[i]._theta));
+
+      // -----------one-way / corridor heading gate ----------------
+      bool heading_ok = true;
+      if (si && si->use_direction_map && dir_map)
+      {
+        // Convert projected continuous cell coords to integer (map :grid indices
+        const unsigned int mx =
+            static_cast<unsigned int>(std::round(neighbor->pose.x));
+        const unsigned int my =
+            static_cast<unsigned int>(std::round(neighbor->pose.y));
+
+        float theta_ref; // preferred heading (radians)
+        if (dir_map->getPreferredTheta(mx, my, theta_ref))
+        {
+          // Motion heading from current node -> projected neighbor
+          const float dx = neighbor->pose.x - this->pose.x;
+          const float dy = neighbor->pose.y - this->pose.y;
+          const float theta_motion = std::atan2(dy, dx);
+
+          // Gate by maximum deviation
+          const float dtheta = std::fabs(normAngle(theta_motion - theta_ref));
+          if (dtheta > kMaxHeadingDevRad)
+          {
+            heading_ok = false; // reject this neighbor
+          }
+        }
+      }
+      if (!heading_ok)
+      {
+        // restore pose (not strictly necessary, but keeps behavior consistent)
+        neighbor->setPose(initial_node_coords);
+        continue; // skip pushing this neighbor
+      }
+      // ---------------- END 
       if (neighbor->isNodeValid(traverse_unknown, collision_checker)) {
         neighbor->setMotionPrimitiveIndex(i);
         neighbors.push_back(neighbor);

@@ -20,6 +20,10 @@
 
 #include "Eigen/Core"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
+#include "nav2_smac_planner/direction_map.hpp" 
+#include "nav2_smac_planner/node_hybrid.hpp"
+#include <nav_msgs/msg/occupancy_grid.hpp>
+
 
 // #define BENCHMARK_TESTING
 
@@ -181,6 +185,67 @@ void SmacPlannerHybrid::configure(
     _lookup_table_dim += 1.0;
   }
 
+  // --- Direction-map guidance parameters ---
+  nav2_util::declare_parameter_if_not_declared(
+      node, name + ".use_direction_map", rclcpp::ParameterValue(false));
+  node->get_parameter(name + ".use_direction_map", use_direction_map_);
+
+  nav2_util::declare_parameter_if_not_declared(
+      node, name + ".direction_map_topic", rclcpp::ParameterValue(std::string("direction_map")));
+  node->get_parameter(name + ".direction_map_topic", direction_map_topic_);
+
+  nav2_util::declare_parameter_if_not_declared(
+      node, name + ".direction_attract_weight", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name + ".direction_attract_weight", direction_attract_weight_);
+
+  nav2_util::declare_parameter_if_not_declared(
+      node, name + ".direction_heading_weight", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name + ".direction_heading_weight", direction_heading_weight_);
+
+  nav2_util::declare_parameter_if_not_declared(
+      node, name + ".direction_heading_decay", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name + ".direction_heading_decay", direction_heading_decay_);
+
+  // nav2_util::declare_parameter_if_not_declared(
+  //     node, name + ".heading_bias_weight", rclcpp::ParameterValue(0.3));
+  // node->get_parameter(name + ".heading_bias_weight", _heading_bias_weight);
+
+  // nav2_util::declare_parameter_if_not_declared(
+  //     node, name + ".heading_bias_exponent", rclcpp::ParameterValue(1.5));
+  // node->get_parameter(name + ".heading_bias_exponent", _heading_bias_exponent);
+
+  // Mirror all of these into SearchInfo (what NodeHybrid reads)
+  _search_info.use_direction_map = use_direction_map_;
+  _search_info.direction_map = direction_map_; // may be nullptr now; set below if used
+  _search_info.direction_attract_weight = direction_attract_weight_;
+  _search_info.direction_heading_weight = direction_heading_weight_;
+  _search_info.direction_heading_decay = direction_heading_decay_;
+  // _search_info._heading_bias_weight = _heading_bias_weight;
+  // _search_info._heading_bias_exponent = _heading_bias_exponent;
+
+  // Make the SearchInfo visible: SearchInfo passed to NodeHybrid
+  NodeHybrid::setSearchInfo(&_search_info);
+
+  // Create and subscribe to the direction map if enabled
+  if (_search_info.use_direction_map)
+  {
+    if (!direction_map_)
+    {
+      direction_map_ = std::make_shared<nav2_smac_planner::DirectionMap>();
+    }
+    _search_info.direction_map = direction_map_; // keep SearchInfo in sync
+
+    direction_map_sub_ = node->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        direction_map_topic_,
+        rclcpp::QoS(1).transient_local().reliable(),
+        std::bind(&SmacPlannerHybrid::directionMapCallback, this, std::placeholders::_1));
+  }
+  else
+  {
+    direction_map_sub_.reset();
+    _search_info.direction_map.reset();
+  }
+
   // Initialize collision checker
   _collision_checker = GridCollisionChecker(_costmap, _angle_quantizations, node);
   _collision_checker.setFootprint(
@@ -264,6 +329,18 @@ void SmacPlannerHybrid::cleanup()
     _costmap_downsampler.reset();
   }
   _raw_plan_publisher.reset();
+}
+
+void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+{
+  RCLCPP_INFO(_logger, "[DirectionMap] Received map with size: %d x %d",
+              msg->info.width, msg->info.height);
+
+  if (!direction_map_)
+  {
+    direction_map_ = std::make_shared<DirectionMap>();
+  }
+  direction_map_->setGrid(*msg);
 }
 
 nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
@@ -435,7 +512,9 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       } else if (name == _name + ".non_straight_penalty") {
         reinit_a_star = true;
         _search_info.non_straight_penalty = static_cast<float>(parameter.as_double());
-      } else if (name == _name + ".cost_penalty") {
+      }
+      else if (name == _name + ".cost_penalty")
+      {
         reinit_a_star = true;
         _search_info.cost_penalty = static_cast<float>(parameter.as_double());
       } else if (name == _name + ".analytic_expansion_ratio") {
@@ -445,7 +524,25 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         reinit_a_star = true;
         _search_info.analytic_expansion_max_length =
           static_cast<float>(parameter.as_double()) / _costmap->getResolution();
+ // --- Direction-map knobs (live-tunable doubles) ---
+      } else if (name == _name + ".direction_attract_weight") {
+        direction_attract_weight_ = parameter.as_double();
+        _search_info.direction_attract_weight = direction_attract_weight_;
+      } else if (name == _name + ".direction_heading_weight") {
+        direction_heading_weight_ = parameter.as_double();
+        _search_info.direction_heading_weight = direction_heading_weight_;
+      } else if (name == _name + ".direction_heading_decay") {
+        direction_heading_decay_ = parameter.as_double();
+        _search_info.direction_heading_decay = direction_heading_decay_;
       }
+      // } else if (name == _name + ".heading_bias_weight") {
+      //   _heading_bias_weight = parameter.as_double();
+      //   _search_info._heading_bias_weight = _heading_bias_weight;
+      // } else if (name == _name + ".heading_bias_exponent") {
+      //   _heading_bias_exponent = parameter.as_double();
+      //   _search_info._heading_bias_exponent = _heading_bias_exponent;
+      // }
+
     } else if (type == ParameterType::PARAMETER_BOOL) {
       if (name == _name + ".downsample_costmap") {
         reinit_downsampler = true;
@@ -463,12 +560,36 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
           _smoother.reset();
         }
       }
-    } else if (type == ParameterType::PARAMETER_INTEGER) {
-      if (name == _name + ".downsampling_factor") {
-        reinit_a_star = true;
-        reinit_downsampler = true;
-        _downsampling_factor = parameter.as_int();
-      } else if (name == _name + ".max_iterations") {
+      else if (name == _name + ".use_direction_map")
+      {
+        use_direction_map_ = parameter.as_bool();
+        _search_info.use_direction_map = use_direction_map_;
+        auto node = _node.lock();
+        if (_search_info.use_direction_map)
+        {
+          if (!direction_map_)
+          {
+            direction_map_ = std::make_shared<nav2_smac_planner::DirectionMap>();
+          }
+          _search_info.direction_map = direction_map_;
+          direction_map_sub_ = node->create_subscription<nav_msgs::msg::OccupancyGrid>(
+              direction_map_topic_, rclcpp::QoS(1).transient_local().reliable(),
+              std::bind(&SmacPlannerHybrid::directionMapCallback, this, std::placeholders::_1));
+        }
+        else
+        {
+          direction_map_sub_.reset();
+          _search_info.direction_map.reset();
+        }
+      }
+      }else if (type == ParameterType::PARAMETER_INTEGER)
+      {
+        if (name == _name + ".downsampling_factor")
+        {
+          reinit_a_star = true;
+          reinit_downsampler = true;
+          _downsampling_factor = parameter.as_int();
+        } else if (name == _name + ".max_iterations") {
         reinit_a_star = true;
         _max_iterations = parameter.as_int();
         if (_max_iterations <= 0) {
@@ -493,19 +614,35 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         _angle_bin_size = 2.0 * M_PI / angle_quantizations;
         _angle_quantizations = static_cast<unsigned int>(angle_quantizations);
       }
-    } else if (type == ParameterType::PARAMETER_STRING) {
-      if (name == _name + ".motion_model_for_search") {
-        reinit_a_star = true;
-        _motion_model = fromString(parameter.as_string());
-        if (_motion_model == MotionModel::UNKNOWN) {
-          RCLCPP_WARN(
-            _logger,
-            "Unable to get MotionModel search type. Given '%s', "
-            "valid options are MOORE, VON_NEUMANN, DUBIN, REEDS_SHEPP.",
-            _motion_model_for_search.c_str());
+      }
+      else if (type == ParameterType::PARAMETER_STRING)
+      {
+        if (name == _name + ".motion_model_for_search")
+        {
+          reinit_a_star = true;
+          _motion_model = fromString(parameter.as_string());
+          if (_motion_model == MotionModel::UNKNOWN)
+          {
+            RCLCPP_WARN(
+                _logger,
+                "Unable to get MotionModel search type. Given '%s', "
+                "valid options are MOORE, VON_NEUMANN, DUBIN, REEDS_SHEPP.",
+                _motion_model_for_search.c_str());
+          }
+          // --- Change direction-map topic on the fly ---
+        }
+        else if (name == _name + ".direction_map_topic")
+        {
+          direction_map_topic_ = parameter.as_string();
+          if (use_direction_map_)
+          {
+            auto node = _node.lock();
+            direction_map_sub_ = node->create_subscription<nav_msgs::msg::OccupancyGrid>(
+                direction_map_topic_, rclcpp::QoS(1).transient_local().reliable(),
+                std::bind(&SmacPlannerHybrid::directionMapCallback, this, std::placeholders::_1));
+          }
         }
       }
-    }
   }
 
   // Re-init if needed with mutex lock (to avoid re-init while creating a plan)
