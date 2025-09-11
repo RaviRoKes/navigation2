@@ -52,7 +52,7 @@ struct SearchInfo
   bool use_direction_map = false;
   double direction_attract_weight = 0.0;   // distance-to-corridor bias
   double direction_heading_weight = 0.0;   // heading alignment bias
-  double direction_heading_decay = 0.0;    // exp decay factor (per cell)
+  // double direction_heading_decay = 0.0;    // exp decay factor (per cell)
 
   // // Optional extra bias model if you’re using it elsewhere
   // double _heading_bias_weight = 0.0;

@@ -17,6 +17,7 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
+#include "tf2/utils.h"
 
 #include "Eigen/Core"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
@@ -202,9 +203,9 @@ void SmacPlannerHybrid::configure(
       node, name + ".direction_heading_weight", rclcpp::ParameterValue(0.0));
   node->get_parameter(name + ".direction_heading_weight", direction_heading_weight_);
 
-  nav2_util::declare_parameter_if_not_declared(
-      node, name + ".direction_heading_decay", rclcpp::ParameterValue(0.0));
-  node->get_parameter(name + ".direction_heading_decay", direction_heading_decay_);
+  // nav2_util::declare_parameter_if_not_declared(
+  //     node, name + ".direction_heading_decay", rclcpp::ParameterValue(0.0));
+  // node->get_parameter(name + ".direction_heading_decay", direction_heading_decay_);
 
   // nav2_util::declare_parameter_if_not_declared(
   //     node, name + ".heading_bias_weight", rclcpp::ParameterValue(0.3));
@@ -219,7 +220,7 @@ void SmacPlannerHybrid::configure(
   _search_info.direction_map = direction_map_; // may be nullptr now; set below if used
   _search_info.direction_attract_weight = direction_attract_weight_;
   _search_info.direction_heading_weight = direction_heading_weight_;
-  _search_info.direction_heading_decay = direction_heading_decay_;
+  // _search_info.direction_heading_decay = direction_heading_decay_;
   // _search_info._heading_bias_weight = _heading_bias_weight;
   // _search_info._heading_bias_exponent = _heading_bias_exponent;
 
@@ -333,7 +334,7 @@ void SmacPlannerHybrid::cleanup()
 
 void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 {
-  RCLCPP_INFO(_logger, "[DirectionMap] Received map with size: %d x %d",
+  RCLCPP_INFO(_logger, "[DirectionMap] Received map with size: %u x %u",
               msg->info.width, msg->info.height);
 
   if (!direction_map_)
@@ -408,7 +409,7 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   pose.pose.orientation.z = 0.0;
   pose.pose.orientation.w = 1.0;
 
-  // Compute plan
+  // Compute plan Hbrid A*
   NodeHybrid::CoordinateVector path;
   int num_iterations = 0;
   std::string error;
@@ -427,11 +428,38 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
     error += e.what();
   }
 
-  if (!error.empty()) {
+  if (!error.empty())
+  {
+    steady_clock::time_point b = steady_clock::now();
+    duration<double> time_span = duration_cast<duration<double>>(b - a);
     RCLCPP_WARN(
-      _logger,
-      "%s: failed to create plan, %s.",
-      _name.c_str(), error.c_str());
+        _logger,
+        "%s: failed to create plan, %s.",
+        _name.c_str(), error.c_str());
+
+    RCLCPP_WARN(
+        _logger,
+        "%s: failed to create plan (%s) after %.3f sec and %d iterations",
+        _name.c_str(), error.c_str(),
+        time_span.count(), num_iterations);
+
+    // Print profiling summary for failed plans
+    RCLCPP_INFO(
+        _logger,
+        "[Planner Summary] Expanded Nodes: %zu | Checked Neighbors: %zu | "
+        "Accepted: %zu | Rejected Heading: %zu | Rejected Collision: %zu",
+        NodeHybrid::nodes_expanded,
+        NodeHybrid::neighbors_checked,
+        NodeHybrid::neighbors_accepted,
+        NodeHybrid::neighbors_rejected_heading,
+        NodeHybrid::neighbors_rejected_collision);
+
+    // Reset profiling counters for the next planning attempt
+    NodeHybrid::nodes_expanded = 0;
+    NodeHybrid::neighbors_checked = 0;
+    NodeHybrid::neighbors_accepted = 0;
+    NodeHybrid::neighbors_rejected_heading = 0;
+    NodeHybrid::neighbors_rejected_collision = 0;
     return plan;
   }
 
@@ -452,6 +480,30 @@ nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
   steady_clock::time_point b = steady_clock::now();
   duration<double> time_span = duration_cast<duration<double>>(b - a);
   double time_remaining = _max_planning_time - static_cast<double>(time_span.count());
+
+  // Print profiling summary for successful plans
+  RCLCPP_INFO(
+      _logger,
+      "[Planner Summary] Expanded Nodes: %zu | Checked Neighbors: %zu | "
+      "Accepted: %zu | Rejected Heading: %zu | Rejected Collision: %zu",
+      NodeHybrid::nodes_expanded,
+      NodeHybrid::neighbors_checked,
+      NodeHybrid::neighbors_accepted,
+      NodeHybrid::neighbors_rejected_heading,
+      NodeHybrid::neighbors_rejected_collision);
+
+  RCLCPP_INFO(
+    _logger,
+    "%s: Successfully created plan in %.3f sec with %d iterations and %zu poses",
+    _name.c_str(), time_span.count(), num_iterations, plan.poses.size());
+
+  // Reset profiling counters after each plan
+  NodeHybrid::nodes_expanded = 0;
+  NodeHybrid::neighbors_checked = 0;
+  NodeHybrid::neighbors_accepted = 0;
+  NodeHybrid::neighbors_rejected_heading = 0;
+  NodeHybrid::neighbors_rejected_collision = 0;
+
 
 #ifdef BENCHMARK_TESTING
   std::cout << "It took " << time_span.count() * 1000 <<
@@ -531,17 +583,7 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       } else if (name == _name + ".direction_heading_weight") {
         direction_heading_weight_ = parameter.as_double();
         _search_info.direction_heading_weight = direction_heading_weight_;
-      } else if (name == _name + ".direction_heading_decay") {
-        direction_heading_decay_ = parameter.as_double();
-        _search_info.direction_heading_decay = direction_heading_decay_;
       }
-      // } else if (name == _name + ".heading_bias_weight") {
-      //   _heading_bias_weight = parameter.as_double();
-      //   _search_info._heading_bias_weight = _heading_bias_weight;
-      // } else if (name == _name + ".heading_bias_exponent") {
-      //   _heading_bias_exponent = parameter.as_double();
-      //   _search_info._heading_bias_exponent = _heading_bias_exponent;
-      // }
 
     } else if (type == ParameterType::PARAMETER_BOOL) {
       if (name == _name + ".downsample_costmap") {

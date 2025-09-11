@@ -132,7 +132,7 @@ protected:
   bool use_direction_map_{false};
   double direction_attract_weight_{0.0};
   double direction_heading_weight_{0.0};
-  double direction_heading_decay_{0.0};
+  // double direction_heading_decay_{0.0};
   // double _heading_bias_weight{0.3};
   // double _heading_bias_exponent{1.5};
   void directionMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);

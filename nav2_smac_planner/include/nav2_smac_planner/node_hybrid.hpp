@@ -454,8 +454,14 @@ public:
   static LookupTable dist_heuristic_lookup_table;
   static float size_lookup;
 
-  static void setSearchInfo(SearchInfo* si) { search_info = si; }
-  static SearchInfo* search_info;
+  static void setSearchInfo(SearchInfo *si) { search_info = si; }
+  static SearchInfo *search_info;
+
+  static size_t neighbors_checked;
+  static size_t neighbors_accepted;
+  static size_t neighbors_rejected_heading;
+  static size_t neighbors_rejected_collision;
+  static size_t nodes_expanded;
 
 private:
   float _cell_cost;
