@@ -357,47 +357,49 @@ float NodeHybrid::getTraversalCost(const NodePtr & child)
 
   if (si && si->use_direction_map && dir_map && dir_map->isValid())
   {
-    //     // Get cell indices in map coordinates
-    const int mx = static_cast<int>(std::lround(child->pose.x));
-    const int my = static_cast<int>(std::lround(child->pose.y));
+    // Get x,y in grid coordinates to  in map cell indices, for looking up direction map value
+    int mx, my;
+    if (dir_map->worldToMap(child->pose.x * si->costmap_resolution + si->origin_x,
+                            child->pose.y * si->costmap_resolution + si->origin_y,
+                            mx, my))
 
-    float theta_ref; // preferred heading (radians) from direction map
-    if (dir_map->getPreferredTheta(static_cast<unsigned int>(mx),
-                                   static_cast<unsigned int>(my),
-                                   theta_ref))
     {
-      // Compute the actual motion heading between parent and child (radians)
-      const float dx = child->pose.x - this->pose.x;
-      const float dy = child->pose.y - this->pose.y;
-      const float theta_motion = std::atan2(dy, dx);
-
-      // Use ROS2-friendly function to compute minimal angular difference [-π, π]: (theta_motion - theta_ref)
-      const float dtheta = angles::shortest_angular_distance(theta_ref, theta_motion);
-      if (si->direction_heading_weight > 0.0f)
+      float theta_ref = dir_map->lookupHeadingRad(mx, my);
+      if (!std::isnan(theta_ref))
       {
-        const float heading_factor =
-            1.0f + static_cast<float>(si->direction_heading_weight) * dtheta * dtheta;
+        // Compute the actual motion heading between parent and child (radians)
+        const float dx = child->pose.x - this->pose.x;
+        const float dy = child->pose.y - this->pose.y;
+        const float theta_motion = std::atan2(dy, dx);
 
-        travel_cost *= heading_factor;
-        RCLCPP_DEBUG(
-            rclcpp::get_logger("smac_planner"),
-            "[getTraversalCost] From (%.2f, %.2f) to (%.2f, %.2f): "
-            "θ_ref=%.2f θ_motion=%.2f dθ=%.2f heading_weight=%.2f heading_factor=%.3f final_cost=%.3f",
-            this->pose.x, this->pose.y,
-            child->pose.x, child->pose.y,
-            theta_ref, theta_motion, dtheta,
-            si->direction_heading_weight,
-            heading_factor,
-            travel_cost);
-      }
-      else
-      {
-        //No preferred heading → skip heading cost
-        RCLCPP_DEBUG(
-            rclcpp::get_logger("smac_planner"),
-            "[getTraversalCost] No preferred heading at cell (%u, %u). "
-            "Skipping heading bias penalty.",
-            mx, my);
+        // minimal angular difference [-π, π]: (theta_motion - theta_ref)
+        const float dtheta = angles::shortest_angular_distance(theta_ref, theta_motion);
+        if (si->direction_heading_weight > 0.0f)
+        {
+          const float heading_factor =
+              1.0f + static_cast<float>(si->direction_heading_weight) * dtheta * dtheta;
+
+          travel_cost *= heading_factor;
+          RCLCPP_DEBUG(
+              rclcpp::get_logger("smac_planner"),
+              "[getTraversalCost] From (%.2f, %.2f) to (%.2f, %.2f): "
+              "θ_ref=%.2f θ_motion=%.2f dθ=%.2f heading_weight=%.2f heading_factor=%.3f final_cost=%.3f",
+              this->pose.x, this->pose.y,
+              child->pose.x, child->pose.y,
+              theta_ref, theta_motion, dtheta,
+              si->direction_heading_weight,
+              heading_factor,
+              travel_cost);
+        }
+        else
+        {
+          // No pref heading skip heading cost
+          RCLCPP_DEBUG(
+              rclcpp::get_logger("smac_planner"),
+              "[getTraversalCost] No preferred heading at cell (%u, %u). "
+              "Skipping heading bias penalty.",
+              mx, my);
+        }
       }
     }
   }
@@ -725,31 +727,29 @@ void NodeHybrid::precomputeDistanceHeuristic(
 }
 
 void NodeHybrid::getNeighbors(
-  std::function<bool(const unsigned int &, nav2_smac_planner::NodeHybrid * &)> & NeighborGetter,
-  GridCollisionChecker * collision_checker,
-  const bool & traverse_unknown,
-  NodeVector & neighbors)
+    std::function<bool(const unsigned int &, nav2_smac_planner::NodeHybrid *&)> &NeighborGetter,
+    GridCollisionChecker *collision_checker,
+    const bool &traverse_unknown,
+    NodeVector &neighbors)
 {
-  nodes_expanded++;  // Count how many nodes are expanded during planning
+  nodes_expanded++; // Count how many nodes are expanded during planning
   unsigned int index = 0;
   NodePtr neighbor = nullptr;
   Coordinates initial_node_coords;
   const MotionPoses motion_projections = motion_table.getProjections(this);
-
-  // --- Hard gating threshold (radians). Make this a param later (allow maximum deviation from pref direc)
-  constexpr float kMaxHeadingDevRad = static_cast<float>(M_PI) / 2.0f; // 90°
 
   // Grab direction map (if provided)
   auto si = NodeHybrid::search_info;
   std::shared_ptr<nav2_smac_planner::DirectionMap> dir_map =
       (si) ? si->direction_map : nullptr;
 
-  for (unsigned int i = 0; i != motion_projections.size(); i++) {
+  for (unsigned int i = 0; i != motion_projections.size(); i++)
+  {
     index = NodeHybrid::getIndex(
-      static_cast<unsigned int>(motion_projections[i]._x),
-      static_cast<unsigned int>(motion_projections[i]._y),
-      static_cast<unsigned int>(motion_projections[i]._theta),
-      motion_table.size_x, motion_table.num_angle_quantization);
+        static_cast<unsigned int>(motion_projections[i]._x),
+        static_cast<unsigned int>(motion_projections[i]._y),
+        static_cast<unsigned int>(motion_projections[i]._theta),
+        motion_table.size_x, motion_table.num_angle_quantization);
 
     if (NeighborGetter(index, neighbor) && !neighbor->wasVisited())
     {
@@ -767,36 +767,38 @@ void NodeHybrid::getNeighbors(
       bool heading_ok = true;
       if (si && si->use_direction_map && dir_map)
       {
-        // Convert projected continuous cell coords to integer (map :grid indices
-        const unsigned int mx =
-            static_cast<unsigned int>(std::round(neighbor->pose.x));
-        const unsigned int my =
-            static_cast<unsigned int>(std::round(neighbor->pose.y));
-
-        float theta_ref; // preferred heading (radians)
-        if (dir_map->getPreferredTheta(mx, my, theta_ref))
+        int mx, my;
+        if (dir_map->worldToMap(neighbor->pose.x * si->costmap_resolution + si->origin_x,
+                                neighbor->pose.y * si->costmap_resolution + si->origin_y,
+                                mx, my))
         {
-          // Motion heading from current node -> projected neighbor
-          const float dx = neighbor->pose.x - this->pose.x;
-          const float dy = neighbor->pose.y - this->pose.y;
-          const float theta_motion = std::atan2(dy, dx);
-
-          // ROS2 utility to compute shortest angular distance [-π, π]
-          const float dtheta = std::fabs(angles::shortest_angular_distance(theta_ref, theta_motion));
-          if (dtheta > kMaxHeadingDevRad)
+          float theta_ref = dir_map->lookupHeadingRad(mx, my);
+          if (!std::isnan(theta_ref))
           {
-            heading_ok = false; // reject this neighbor
-            neighbors_rejected_heading++;
-            RCLCPP_DEBUG(
-                rclcpp::get_logger("smac_planner"),
-                "[getNeighbors] Rejecting neighbor at (%f, %f): "
-                "θ_ref=%.2f rad, θ_motion=%.2f rad, dθ=%.2f > %.2f",
-                neighbor->pose.x, neighbor->pose.y,
-                theta_ref, theta_motion, dtheta, kMaxHeadingDevRad);
+            // Motion heading from current node -> projected neighbor
+            const float dx = neighbor->pose.x - this->pose.x;
+            const float dy = neighbor->pose.y - this->pose.y;
+            const float theta_motion = std::atan2(dy, dx);
+
+            // ROS2 utility to compute shortest angular distance [-π, π]:: (theta_motion - theta_ref)
+            const float dtheta = std::fabs(angles::shortest_angular_distance(theta_ref, theta_motion));
+            if (dtheta > si->max_heading_deviation_rad)
+            {
+              heading_ok = false; // reject this neighbor
+              neighbors_rejected_heading++;
+              RCLCPP_DEBUG(
+                  rclcpp::get_logger("smac_planner"),
+                  "[getNeighbors] Rejecting neighbor at (%.2f, %.2f): "
+                  "θ_ref=%.2f rad, θ_motion=%.2f rad, dθ=%.2f > %.2f",
+                  static_cast<double>(neighbor->pose.x),
+                  static_cast<double>(neighbor->pose.y),
+                  static_cast<double>(theta_ref),
+                  static_cast<double>(theta_motion),
+                  static_cast<double>(dtheta),
+                  static_cast<double>(si->max_heading_deviation_rad));
+            }
           }
-          else
-          {
-
+          else {
             // No preferred heading at this cell → accept neighbor normally
             RCLCPP_DEBUG(
                 rclcpp::get_logger("smac_planner"),
@@ -804,54 +806,52 @@ void NodeHybrid::getNeighbors(
                 mx, my);
           }
         }
-      }
-      if (!heading_ok)
-      {
-        // restore pose (not strictly necessary, but keeps behavior consistent)
-        neighbor->setPose(initial_node_coords);
-        continue; // skip pushing this neighbor
-      }
-      // ---------------- END
+        }
+        if (!heading_ok){
+          // restore pose (not strictly necessary, but keeps behavior consistent)
+          neighbor->setPose(initial_node_coords);
+          continue; // skip pushing this neighbor
+        }
+        // ---------------- END
 
-      if (neighbor->isNodeValid(traverse_unknown, collision_checker)) {
-        neighbor->setMotionPrimitiveIndex(i);
-        neighbors.push_back(neighbor);
-        neighbors_accepted++;
-      } else {
-        // Reject neighbor due to collision
-        neighbors_rejected_collision++;
-        RCLCPP_DEBUG(
-          rclcpp::get_logger("smac_planner"),
-          "[getNeighbors] Skipped neighbor (%f, %f) due to collision.",
-          neighbor->pose.x, neighbor->pose.y
-        );
-        neighbor->setPose(initial_node_coords);
+        if (neighbor->isNodeValid(traverse_unknown, collision_checker)){
+          neighbor->setMotionPrimitiveIndex(i);
+          neighbors.push_back(neighbor);
+          neighbors_accepted++;
+        }
+        else{
+          // Reject neighbor due to collision
+          neighbors_rejected_collision++;
+          RCLCPP_DEBUG(
+              rclcpp::get_logger("smac_planner"),
+              "[getNeighbors] Skipped neighbor (%f, %f) due to collision.",
+              neighbor->pose.x, neighbor->pose.y);
+          neighbor->setPose(initial_node_coords);
+        }
       }
     }
   }
-}
 
-bool NodeHybrid::backtracePath(CoordinateVector & path)
-{
-  if (!this->parent) {
-    return false;
-  }
+  bool NodeHybrid::backtracePath(CoordinateVector & path)
+  {
+    if (!this->parent){
+      return false;
+    }
 
-  NodePtr current_node = this;
+    NodePtr current_node = this;
 
-  while (current_node->parent) {
+    while (current_node->parent){
+      path.push_back(current_node->pose);
+      // Convert angle to radians
+      path.back().theta = NodeHybrid::motion_table.getAngleFromBin(path.back().theta);
+      current_node = current_node->parent;
+    }
+
+    // add the start pose
     path.push_back(current_node->pose);
     // Convert angle to radians
     path.back().theta = NodeHybrid::motion_table.getAngleFromBin(path.back().theta);
-    current_node = current_node->parent;
+
+    return true;
   }
-
-  // add the start pose
-  path.push_back(current_node->pose);
-  // Convert angle to radians
-  path.back().theta = NodeHybrid::motion_table.getAngleFromBin(path.back().theta);
-
-  return true;
-}
-
-}  // namespace nav2_smac_planner
+} // namespace nav2_smac_planner

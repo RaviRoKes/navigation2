@@ -24,6 +24,8 @@
 #include "nav2_smac_planner/direction_map.hpp" 
 #include "nav2_smac_planner/node_hybrid.hpp"
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include "nav2_smac_planner/direction_map.hpp" 
+
 
 
 // #define BENCHMARK_TESTING
@@ -203,26 +205,26 @@ void SmacPlannerHybrid::configure(
       node, name + ".direction_heading_weight", rclcpp::ParameterValue(0.0));
   node->get_parameter(name + ".direction_heading_weight", direction_heading_weight_);
 
-  // nav2_util::declare_parameter_if_not_declared(
-  //     node, name + ".direction_heading_decay", rclcpp::ParameterValue(0.0));
-  // node->get_parameter(name + ".direction_heading_decay", direction_heading_decay_);
+  nav2_util::declare_parameter_if_not_declared(
+      node, name + ".max_heading_deviation_rad", rclcpp::ParameterValue(M_PI / 2.0));
+  node->get_parameter(name + ".max_heading_deviation_rad",
+                      _search_info.max_heading_deviation_rad);
+  // Auto-sync some costmap info into SearchInfo (optional; for reference in NodeHybrid)
+  _search_info.costmap_resolution = _costmap->getResolution();
+  _search_info.origin_x = _costmap->getOriginX();
+  _search_info.origin_y = _costmap->getOriginY();
 
-  // nav2_util::declare_parameter_if_not_declared(
-  //     node, name + ".heading_bias_weight", rclcpp::ParameterValue(0.3));
-  // node->get_parameter(name + ".heading_bias_weight", _heading_bias_weight);
-
-  // nav2_util::declare_parameter_if_not_declared(
-  //     node, name + ".heading_bias_exponent", rclcpp::ParameterValue(1.5));
-  // node->get_parameter(name + ".heading_bias_exponent", _heading_bias_exponent);
+  RCLCPP_INFO(_logger,
+              "SmacPlannerHybrid: costmap res=%.3f, origin=(%.2f, %.2f)",
+              _search_info.costmap_resolution,
+              _search_info.origin_x,
+              _search_info.origin_y);
 
   // Mirror all of these into SearchInfo (what NodeHybrid reads)
   _search_info.use_direction_map = use_direction_map_;
   _search_info.direction_map = direction_map_; // may be nullptr now; set below if used
   _search_info.direction_attract_weight = direction_attract_weight_;
   _search_info.direction_heading_weight = direction_heading_weight_;
-  // _search_info.direction_heading_decay = direction_heading_decay_;
-  // _search_info._heading_bias_weight = _heading_bias_weight;
-  // _search_info._heading_bias_exponent = _heading_bias_exponent;
 
   // Make the SearchInfo visible: SearchInfo passed to NodeHybrid
   NodeHybrid::setSearchInfo(&_search_info);
@@ -583,8 +585,9 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       } else if (name == _name + ".direction_heading_weight") {
         direction_heading_weight_ = parameter.as_double();
         _search_info.direction_heading_weight = direction_heading_weight_;
+      }else if (name == _name + ".max_heading_deviation_rad"){
+        _search_info.max_heading_deviation_rad = parameter.as_double();
       }
-
     } else if (type == ParameterType::PARAMETER_BOOL) {
       if (name == _name + ".downsample_costmap") {
         reinit_downsampler = true;

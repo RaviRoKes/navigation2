@@ -24,7 +24,7 @@ namespace nav2_smac_planner
       frame_id_ = msg.header.frame_id;
       have_ = true; // set flag : have map now
     }
-    // Quick validity check
+    // check if map is usable
     bool isValid() const
     {
       std::lock_guard<std::mutex> lk(m_);
@@ -43,7 +43,7 @@ namespace nav2_smac_planner
       const double res = info_.resolution; // meters per cell? (e.g., 0.05m/pixel)
       const double ox = info_.origin.position.x;
       const double oy = info_.origin.position.y;
-      // Convert real-world coordinates (meters) to grid cell coordinate map (40x30)
+      // Convert world coordinates (meters) to grid cell coordinate map (40x30)
       mx = static_cast<int>(std::floor((wx - ox) / res));
       my = static_cast<int>(std::floor((wy - oy) / res));
       // Check if the calculated cell is actually inside the map boundaries
@@ -64,10 +64,11 @@ namespace nav2_smac_planner
       // Read signed and unsigned views
       const int8_t s = data_[idx];               // Get the cell value as a signed byte (-128 to 127)(ROS unknown = -1)
       const uint8_t u = static_cast<uint8_t>(s); // unsigned (0..255)
+      // int val = static_cast<int>(data_[idx]);
 
-      // // unknown cell → no preference
-      // if (s == -1)
-      //   return false;
+      // unknown cell → no preference
+      if (s == -1)
+        return false;
 
       // treat pure white as "no preference"
       // (so only painted corridor cells bias the heading)
@@ -120,7 +121,7 @@ namespace nav2_smac_planner
       return 50.0f; // tune or replace with proper EDT/DT:ÖEuclidean Distance Transform
     }
 
-    // quick metadata check
+    // metadata check: Checks if a new incoming direction map has the same resolution/origin as the old one.
     bool metaMatches(float resolution, double origin_x, double origin_y) const
     {
       std::lock_guard<std::mutex> lk(m_);

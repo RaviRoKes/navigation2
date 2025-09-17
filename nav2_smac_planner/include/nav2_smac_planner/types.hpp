@@ -52,12 +52,16 @@ struct SearchInfo
   bool use_direction_map = false;
   double direction_attract_weight = 0.0;   // distance-to-corridor bias
   double direction_heading_weight = 0.0;   // heading alignment bias
-  // double direction_heading_decay = 0.0;    // exp decay factor (per cell)
 
-  // // Optional extra bias model if you’re using it elsewhere
-  // double _heading_bias_weight = 0.0;
-  // double _heading_bias_exponent = 1.0;
   std::shared_ptr<nav2_smac_planner::DirectionMap> direction_map;
+
+  // --- Costmap properties (auto-populated from costmap_ros_) ---
+  float costmap_resolution = 0.05f;  // m/cell
+  double origin_x = 0.0;
+  double origin_y = 0.0;
+
+  // --- Heading gate ---
+  float max_heading_deviation_rad = static_cast<float>(M_PI) / 2.0f; // default 90°
 };
 
 /**
