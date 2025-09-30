@@ -194,3 +194,5 @@ bool GridCollisionChecker::outsideRange(const unsigned int & max, const float & 
 }
 
 }  // namespace nav2_smac_planner
+
+

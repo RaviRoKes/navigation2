@@ -1,145 +1,164 @@
 #pragma once
 
 #include <vector>
-#include <atomic>
 #include <limits>
 #include <cmath>
 #include <mutex>
 #include <algorithm>
+#include <string>
+#include <cstdint>
+#include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 
 namespace nav2_smac_planner
 {
-
   class DirectionMap
   {
   public:
     using OG = nav_msgs::msg::OccupancyGrid;
-
     void setGrid(const OG &msg)
     {
       std::lock_guard<std::mutex> lk(m_);
-      info_ = msg.info; // copy map meta data: size, resolu
-      data_ = msg.data; // copy grid cell dtata
-      frame_id_ = msg.header.frame_id;
-      have_ = true; // set flag : have map now
+      size_x_ = msg.info.width;
+      size_y_ = msg.info.height;
+      resolution_ = msg.info.resolution; // meters per cell=, 0.05m/pixel)
+      origin_x_ = msg.info.origin.position.x;
+      origin_y_ = msg.info.origin.position.y;
+      frame_ = msg.header.frame_id;
+      data_ = msg.data; // int8_t, -1 means unknown
+      have_ = (size_x_ > 0 && size_y_ > 0 && resolution_ > 0.0);
+
+      RCLCPP_INFO(rclcpp::get_logger("direction_map"),
+                  "DirectionMap Origin: (%.2f, %.2f)", origin_x_, origin_y_);
+
+      RCLCPP_INFO(rclcpp::get_logger("direction_map"),
+                  "Direction map loaded: %ux%u, res: %.3f m/cell",
+                  size_x_, size_y_, resolution_);
     }
     // check if map is usable
     bool isValid() const
     {
       std::lock_guard<std::mutex> lk(m_);
-      return have_ &&
-             info_.width > 0 && info_.height > 0 &&
-             info_.resolution > 0.0;
+      return have_;
     }
+    // Getters (Costmap2D style)
+    unsigned int getSizeInCellsX() const { return size_x_; }
+    unsigned int getSizeInCellsY() const { return size_y_; }
+    double getResolution() const { return resolution_; }
+    double getOriginX() const { return origin_x_; }
+    double getOriginY() const { return origin_y_; }
+    double getSizeInMetersX() const { return static_cast<double>(size_x_) * resolution_; }
+    double getSizeInMetersY() const { return static_cast<double>(size_y_) * resolution_; }
 
-    // World wx, wy (meters) -> map indices
-    bool worldToMap(double wx, double wy, int &mx, int &my) const
+    // Conversion: map <-> world (same as Costmap2D)
+    void mapToWorld(unsigned int mx, unsigned int my, double &wx, double &wy) const
     {
       std::lock_guard<std::mutex> lk(m_);
-      if (!have_)
-        return false;
-
-      const double res = info_.resolution; // meters per cell? (e.g., 0.05m/pixel)
-      const double ox = info_.origin.position.x;
-      const double oy = info_.origin.position.y;
-      // Convert world coordinates (meters) to grid cell coordinate map (40x30)
-      mx = static_cast<int>(std::floor((wx - ox) / res));
-      my = static_cast<int>(std::floor((wy - oy) / res));
-      // Check if the calculated cell is actually inside the map boundaries
-      return mx >= 0 && my >= 0 &&
-             mx < static_cast<int>(info_.width) &&
-             my < static_cast<int>(info_.height);
+      wx = origin_x_ + (mx + 0.5) * resolution_;
+      wy = origin_y_ + (my + 0.5) * resolution_;
     }
 
-    // return radians in [0, 2π) if available; false = no preference
-    bool getPreferredTheta(unsigned int mx, unsigned int my, float &theta_ref) const
+    // World wx, wy (meters) -> map indices,, mx = colun index x
+    bool worldToMap(double wx, double wy, unsigned int &mx, unsigned int &my) const
     {
       std::lock_guard<std::mutex> lk(m_);
-      if (!have_ || mx >= info_.width || my >= info_.height)
+      if (!have_ || wx < origin_x_ || wy < origin_y_)
         return false;
-      // Calculate the index of the cell in the 1D data array
-      const int idx = static_cast<int>(my) * static_cast<int>(info_.width) + static_cast<int>(mx);
-
-      // Read signed and unsigned views
-      const int8_t s = data_[idx];               // Get the cell value as a signed byte (-128 to 127)(ROS unknown = -1)
-      const uint8_t u = static_cast<uint8_t>(s); // unsigned (0..255)
-      // int val = static_cast<int>(data_[idx]);
-
-      // unknown cell → no preference
-      if (s == -1)
-        return false;
-
-      // treat pure white as "no preference"
-      // (so only painted corridor cells bias the heading)
-      if (u >= 255)
-        return false;
-
-      // map value to [0, 1] depending on encoding
-      float norm;
-      if (u <= 100)
+      mx = static_cast<unsigned int>((wx - origin_x_) / resolution_);
+      my = static_cast<unsigned int>((wy - origin_y_) / resolution_);
+      return mx < size_x_ && my < size_y_;
+    }
+    // Enforce bounds version (clamps mx, my to map edges) ---
+    void worldToMapEnforceBounds(double wx, double wy, int &mx, int &my) const
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      if (wx < origin_x_)
       {
-        // mode: scale (map_server's 0..100)
-        norm = static_cast<float>(u) / 100.0f;
+        mx = 0;
+      }
+      else if (wx > origin_x_ + resolution_ * size_x_)
+      {
+        mx = size_x_ - 1;
       }
       else
       {
-        // mode: raw (full 0..255)
-        norm = static_cast<float>(u) / 255.0f;
+        mx = static_cast<int>((wx - origin_x_) / resolution_);
       }
-      // Convert the normalized value (0->1) to an angle in radians (0 -> 2*Pi)
-      theta_ref = norm * 2.0f * static_cast<float>(M_PI);
-      return true;
-    }
-    // Convenience: same as above but returns NaN when undefined (used by NodeHybrid)
-    float lookupHeadingRad(int mx, int my) const
-    {
-      float theta;
-      if (mx < 0 || my < 0)
-        return std::numeric_limits<float>::quiet_NaN();
-      if (getPreferredTheta(static_cast<unsigned int>(mx), static_cast<unsigned int>(my), theta))
+      if (wy < origin_y_)
       {
-        return theta;
+        my = 0;
       }
-      return std::numeric_limits<float>::quiet_NaN();
+      else if (wy > origin_y_ + resolution_ * size_y_)
+      {
+        my = size_y_ - 1;
+      }
+      else
+      {
+        my = static_cast<int>((wy - origin_y_) / resolution_);
+      }
     }
 
-    // Very simple “distance” proxy in cells for decay:
-    //  - how "far" a cell is from the nearest cell with a preferred direction.
-    // Right now, it's very simple
-    //  - it's either 0 ("right here!") or 50 ("somewhere else").
-    float distanceCells(int mx, int my) const
+    // Utility: check if map indices are inside map bounds ---
+    bool isInsideMap(unsigned int mx, unsigned int my) const
     {
-      float theta;
-      if (mx < 0 || my < 0)
-        return std::numeric_limits<float>::infinity();
-      // Check if the cell has a defined direction
-      if (getPreferredTheta(static_cast<unsigned int>(mx), static_cast<unsigned int>(my), theta))
-      {
-        return 0.0f;
-      }
-      return 50.0f; // tune or replace with proper EDT/DT:ÖEuclidean Distance Transform
+      return mx < size_x_ && my < size_y_;
     }
 
-    // metadata check: Checks if a new incoming direction map has the same resolution/origin as the old one.
-    bool metaMatches(float resolution, double origin_x, double origin_y) const
+    // return radians in [0, 2π), heading at cell , index
+    bool getPreferredTheta(unsigned int mx, unsigned int my, float &theta) const
     {
       std::lock_guard<std::mutex> lk(m_);
-      if (!have_)
+      if (!have_ || mx >= size_x_ || my >= size_y_)
+      {
+        RCLCPP_WARN(rclcpp::get_logger("direction_map"),
+                    "Coordinates out of bounds or map invalid");
         return false;
-      // Check if this map's properties (resolution, origin) match the given ones.
-      // Used to see if a new map is actually different from the current one.
-      return std::abs(info_.resolution - resolution) < 1e-6 &&
-             std::abs(info_.origin.position.x - origin_x) < 1e-6 &&
-             std::abs(info_.origin.position.y - origin_y) < 1e-6;
+      }
+
+      unsigned int idx = my * size_x_ + mx;
+      int raw = static_cast<int>(data_[idx]);
+      int wrapped = (raw + 256) % 256;
+
+      RCLCPP_DEBUG(rclcpp::get_logger("direction_map"),
+                   "getPreferredTheta: (%u,%u) → raw=%d → wrapped=%d",
+                   mx, my, raw, wrapped);
+
+      if (wrapped == 0 || wrapped > 99)
+      {
+        return false; // invalid or no preferred heading
+      }
+
+      theta = static_cast<float>(wrapped) / 100.0f * 2.0f * static_cast<float>(M_PI);
+      return true;
     }
+    bool getPreferredThetaWorld(double wx, double wy, float &theta) const
+    {
+      unsigned int mx, my;
+      if (!worldToMap(wx, wy, mx, my))
+      {
+        RCLCPP_WARN(rclcpp::get_logger("direction_map"),
+                    "[getPreferredThetaWorld] worldToMap failed for (%.2f, %.2f)", wx, wy);
+        return false;
+      }
+
+      return getPreferredTheta(mx, my, theta);
+    }
+
+    std::string frameId() const
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      return frame_;
+    }
+
+    const std::vector<int8_t> &getData() const { return data_; }
 
   private:
     mutable std::mutex m_;
-    nav_msgs::msg::MapMetaData info_; // Map metadata (size, resolution, origin)
-    std::vector<int8_t> data_;        // actual grid data, a list of values for each cell.
-    std::string frame_id_;
     bool have_{false};
+    unsigned int size_x_{0}, size_y_{0};
+    double resolution_{0.0}, origin_x_{0.0}, origin_y_{0.0};
+    std::string frame_;
+    std::vector<int8_t> data_;
   };
 
 } // namespace nav2_smac_planner

@@ -34,6 +34,8 @@
 #include "nav2_util/node_utils.hpp"
 #include "tf2/utils.h"
 #include "nav2_smac_planner/direction_map.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
+
 
 namespace nav2_smac_planner
 {
@@ -127,11 +129,15 @@ protected:
   //data
   std::shared_ptr<nav2_smac_planner::DirectionMap> direction_map_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr direction_map_sub_;
+  rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr heading_marker_pub_;
   
   std::string direction_map_topic_{"direction_map"};
   bool use_direction_map_{false};
   double direction_attract_weight_{0.0};
   double direction_heading_weight_{0.0};
+  // double direction_heading_decay_{0.0};
+  // double max_heading_deviation_rad_;
+
 
   void directionMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
 

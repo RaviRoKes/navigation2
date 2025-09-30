@@ -1,3 +1,4 @@
+
 // Copyright (c) 2020, Samsung Research America
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,6 +32,8 @@
 #include "nav2_smac_planner/types.hpp"
 #include "nav2_smac_planner/collision_checker.hpp"
 #include "nav2_smac_planner/costmap_downsampler.hpp"
+#include "nav2_smac_planner/direction_map.hpp"
+
 
 namespace nav2_smac_planner
 {
