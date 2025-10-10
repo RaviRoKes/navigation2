@@ -98,7 +98,7 @@ namespace nav2_smac_planner
       }
     }
 
-    // Utility: check if map indices are inside map bounds ---
+    // check if map indices are inside map bounds ---
     bool isInsideMap(unsigned int mx, unsigned int my) const
     {
       return mx < size_x_ && my < size_y_;
@@ -151,6 +151,18 @@ namespace nav2_smac_planner
     }
 
     const std::vector<int8_t> &getData() const { return data_; }
+    // Downsampling factor support
+    void setDownsamplingFactor(int factor)
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      downsampling_factor_ = factor;
+    }
+
+    int getDownsamplingFactor() const
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      return downsampling_factor_;
+    }
 
   private:
     mutable std::mutex m_;
@@ -159,6 +171,8 @@ namespace nav2_smac_planner
     double resolution_{0.0}, origin_x_{0.0}, origin_y_{0.0};
     std::string frame_;
     std::vector<int8_t> data_;
+    int downsampling_factor_{1};
   };
 
 } // namespace nav2_smac_planner
+//ya

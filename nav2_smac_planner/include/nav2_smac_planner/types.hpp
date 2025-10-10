@@ -55,6 +55,7 @@ struct SearchInfo
   // float direction_attract_weight = 0.0;   // distance-to-corridor bias
   float direction_heading_weight = 0.0;   // heading alignment bias
   // float direction_heading_decay = 0.0;    // exp decay factor (per cell)
+  bool direction_map_aligned = false;
 
   std::shared_ptr<nav2_smac_planner::DirectionMap> direction_map;
 

@@ -1,3 +1,4 @@
+
 // Copyright (c) 2020, Samsung Research America
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,15 +18,15 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
+#include <unordered_map>
 #include "tf2/utils.h"
 
 #include "Eigen/Core"
 #include "nav2_smac_planner/smac_planner_hybrid.hpp"
 #include "nav2_smac_planner/node_hybrid.hpp"
 #include <nav_msgs/msg/occupancy_grid.hpp>
-#include "nav2_smac_planner/direction_map.hpp" 
+#include "nav2_smac_planner/direction_map.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
-
 
 // #define BENCHMARK_TESTING
 
@@ -187,7 +188,7 @@ void SmacPlannerHybrid::configure(
     _lookup_table_dim += 1.0;
   }
 
-  // --- Direction-map guidance parameters ---
+  //Direction-map guidance parameters
   nav2_util::declare_parameter_if_not_declared(
       node, name + ".use_direction_map", rclcpp::ParameterValue(false));
   node->get_parameter(name + ".use_direction_map", use_direction_map_);
@@ -214,7 +215,6 @@ void SmacPlannerHybrid::configure(
         rclcpp::QoS(1).transient_local().reliable(),
         std::bind(&SmacPlannerHybrid::directionMapCallback, this, std::placeholders::_1));
 
-    // THIS MARKER PUBLISHER H
     heading_marker_pub_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(
         "direction_map_vectors", rclcpp::QoS(1).transient_local());
   }
@@ -224,13 +224,13 @@ void SmacPlannerHybrid::configure(
     _search_info.direction_map.reset();
   }
 
-      // Mirror all of these into SearchInfo (what NodeHybrid reads)
+  // Mirror all of these into SearchInfo (what NodeHybrid reads)
   _search_info.use_direction_map = use_direction_map_;
   _search_info.direction_map = direction_map_; // may be nullptr now; set below if used
   _search_info.direction_heading_weight = direction_heading_weight_;
+
   // Make the SearchInfo visible: SearchInfo passed to NodeHybrid
   NodeHybrid::setSearchInfo(&_search_info);
-
 
   // Initialize collision checker
   _collision_checker = GridCollisionChecker(_costmap, _angle_quantizations, node);
@@ -282,10 +282,7 @@ void SmacPlannerHybrid::activate()
     _logger, "Activating plugin %s of type SmacPlannerHybrid",
     _name.c_str());
   _raw_plan_publisher->on_activate();
-  if (heading_marker_pub_)
-  {
-    heading_marker_pub_->on_activate();
-  }
+  if (heading_marker_pub_) heading_marker_pub_->on_activate();
   if (_costmap_downsampler) {
     _costmap_downsampler->on_activate();
   }
@@ -301,11 +298,7 @@ void SmacPlannerHybrid::deactivate()
     _logger, "Deactivating plugin %s of type SmacPlannerHybrid",
     _name.c_str());
   _raw_plan_publisher->on_deactivate();
-  if (heading_marker_pub_)
-  {
-    heading_marker_pub_->on_deactivate();
-  }
-
+  if (heading_marker_pub_) heading_marker_pub_->on_deactivate();
   if (_costmap_downsampler) {
     _costmap_downsampler->on_deactivate();
   }
@@ -324,119 +317,157 @@ void SmacPlannerHybrid::cleanup()
     _costmap_downsampler.reset();
   }
   _raw_plan_publisher.reset();
-  if (heading_marker_pub_)
-  {
-    heading_marker_pub_.reset();
-  }
 }
 
 void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 {
+   // Cache the incoming message for later reprocessing if parameter change
+  last_direction_map_msg_ = msg;
   RCLCPP_INFO(_logger, "[DirectionMap] Directionmap callback ....Received map with size: %u x %u",
               msg->info.width, msg->info.height);
 
-  if (!direction_map_)
-  {
-    direction_map_ = std::make_shared<DirectionMap>();
+  // Prepare downsampled message (if we will do downsampling)
+  const unsigned int factor = static_cast<unsigned int>(_downsampling_factor);
+  const bool do_downsample = use_direction_map_ && _downsample_costmap && (factor > 1);
+
+  nav_msgs::msg::OccupancyGrid ds_msg; // empty grid to hold downsampled map
+
+  if (do_downsample) {
+    // compute downsampled sizes
+    const unsigned int W = msg->info.width;
+    const unsigned int H = msg->info.height;
+    const unsigned int newW = static_cast<unsigned int>(std::ceil(static_cast<float>(W) / static_cast<float>(factor)));
+    const unsigned int newH = static_cast<unsigned int>(std::ceil(static_cast<float>(H) / static_cast<float>(factor)));
+
+    // copy original and modify fields we need to change
+    ds_msg = *msg;
+    ds_msg.info.width = newW;
+    ds_msg.info.height = newH;
+    ds_msg.info.resolution = msg->info.resolution * static_cast<double>(factor);
+    ds_msg.data.assign(newW * newH, static_cast<int8_t>(-1));
+
+    // helpers for indexing
+    auto in_index = [&](unsigned int ix, unsigned int iy) { return iy * W + ix; }; //original input grid
+    auto out_index = [&](unsigned int ox, unsigned int oy) { return oy * newW + ox; }; //downsampled/output gridd
+
+
+    // Loop through each cell in the downsampled (output) map,
+    // ox, oy: output cell coordinates (x and y) in the downsampled grid
+    for (unsigned int oy = 0; oy < newH; ++oy) {
+      for (unsigned int ox = 0; ox < newW; ++ox) {
+        int obstacle_count = 0;
+        int free_count = 0;
+        bool has_direction = false ;
+
+        unsigned int x_start = ox * factor;
+        unsigned int y_start = oy * factor;
+        // Check the corresponding block in the original to detect obstacle or free cells..(bx,by:block offsets)
+        //ix, iy — the input (original) grid cell coordinates
+        for (unsigned int by = 0; by < factor; ++by) {
+          unsigned int iy = y_start + by;
+          if (iy >= H) break;
+
+          for (unsigned int bx = 0; bx < factor; ++bx) {
+            unsigned int ix = x_start + bx;
+            if (ix >= W) break;
+
+            int raw_value = static_cast<int>(msg->data[in_index(ix, iy)]);
+            if (raw_value == 100) {
+              ++obstacle_count;
+            } else if (raw_value >= 1 && raw_value <= 99) {
+              has_direction = true;
+            } else if (raw_value == 0) {
+              ++free_count;
+            } else {
+              // unknown (-1) -> ignored unless nothing else present
+            }
+          }
+        }
+        // Decide what value to assign to this downsampled cell
+        int8_t output_raw_value = -1;
+        if (obstacle_count > 0)
+        {
+          output_raw_value = 100;
+        }
+        else
+        {
+          //Use center cell value
+          unsigned int center_ix = x_start + factor / 2;
+          unsigned int center_iy = y_start + factor / 2;
+
+          // Clamp to map bounds
+          if (center_ix >= W)
+            center_ix = W - 1;
+          if (center_iy >= H)
+            center_iy = H - 1;
+
+          int center_val = static_cast<int>(msg->data[in_index(center_ix, center_iy)]);
+
+          if (center_val == 100)
+          {
+            output_raw_value = 100;
+          }
+          else if (center_val >= 1 && center_val <= 99)
+          {
+            output_raw_value = static_cast<int8_t>(center_val);
+          }
+          else if (center_val == 0)
+          {
+            output_raw_value = 0;
+          }
+          else
+          {
+            output_raw_value = -1;
+          }
+        }
+        //Store in downsampled map
+        ds_msg.data[out_index(ox, oy)] = output_raw_value;
+      }
+    }
+
+    // set header/time/frame as source
+    ds_msg.header = msg->header;
+    direction_map_->setGrid(ds_msg);
+    RCLCPP_INFO(_logger, "[DirectionMap] downsampled direction map to %u x %u, res=%.3f",
+                ds_msg.info.width, ds_msg.info.height, ds_msg.info.resolution);
+  } else {
+    // no downsample: use original
+    direction_map_->setGrid(*msg);
   }
-  direction_map_->setGrid(*msg);
+
+  // At this point direction_map_ has been set (either with ds_msg or original)
+  // Check alignment with planner active grid (resolution & origin)
   {
-    const auto &info = msg->info;
-    const size_t width = info.width;
-    const size_t height = info.height;
-    const double resolution = info.resolution;
-    const double origin_x = info.origin.position.x;
-    const double origin_y = info.origin.position.y;
-    const double origin_z = info.origin.position.z;
-    const size_t total_cells = static_cast<size_t>(width) * static_cast<size_t>(height);
-    const size_t data_len = msg->data.size();
+    const auto &used_info = do_downsample ? ds_msg.info : msg->info;
 
-    // classification counts
-    size_t unknown_count = 0, free_count = 0, occupied_count = 0, dir_encoded_count = 0;
-    int min_encoded = 256, max_encoded = -256; // will hold min/max of encoded (0..99) and occupied (100)
-    const size_t SAMPLE_N = 20;
-    std::vector<int> sample;
-    sample.reserve(std::min(SAMPLE_N, data_len));
+    const double dir_res = used_info.resolution;
+    const double dir_ox = used_info.origin.position.x;
+    const double dir_oy = used_info.origin.position.y;
 
-    for (size_t i = 0; i < data_len; ++i)
+    // planner active grid resolution (costmap resolution times downsampling factor used by planner)
+    const double planner_res = _costmap->getResolution() * static_cast<double>(_downsampling_factor);
+    const double planner_ox = _costmap->getOriginX();
+    const double planner_oy = _costmap->getOriginY();
+
+    const double eps = 1e-6;
+    if (std::fabs(dir_res - planner_res) < eps &&
+        std::fabs(dir_ox - planner_ox) < eps &&
+        std::fabs(dir_oy - planner_oy) < eps)
     {
-      // msg->data holds int8_t values (-1..100); cast to int to inspect without char surprises
-      int v = static_cast<int>(msg->data[i]);
-
-      if (i < SAMPLE_N)
-      {
-        sample.push_back(v);
-      }
-
-      if (v == -1)
-      {
-        ++unknown_count;
-      }
-      else if (v == 0)
-      {
-        ++free_count;
-        min_encoded = std::min(min_encoded, v);
-        max_encoded = std::max(max_encoded, v);
-      }
-      else if (v == 100)
-      {
-        ++occupied_count;
-        min_encoded = std::min(min_encoded, v);
-        max_encoded = std::max(max_encoded, v);
-      }
-      else if (v >= 1 && v <= 99)
-      {
-        ++dir_encoded_count;
-        min_encoded = std::min(min_encoded, v);
-        max_encoded = std::max(max_encoded, v);
-      }
-      else
-      {
-        // Unexpected value (e.g., >100). Count as 'other' in debug output
-        min_encoded = std::min(min_encoded, v);
-        max_encoded = std::max(max_encoded, v);
-      }
+      _search_info.direction_map_aligned = true;
+      RCLCPP_INFO(_logger, "[DirectionMap] aligned with planner grid (res %.6f m/cell)", dir_res);
+    } else {
+      _search_info.direction_map_aligned = false;
+      RCLCPP_WARN(_logger,
+        "[DirectionMap] NOT aligned: dir_res=%.6f origin=(%.3f,%.3f) planner_res=%.6f origin=(%.3f,%.3f)",
+        dir_res, dir_ox, dir_oy, planner_res, planner_ox, planner_oy);
     }
 
-    RCLCPP_INFO_STREAM(_logger, "[DirectionMap] frame_id: " << msg->header.frame_id
-                                                            << "  stamp(sec.nanosec): " << msg->header.stamp.sec << "." << msg->header.stamp.nanosec);
-    RCLCPP_INFO_STREAM(_logger, "[DirectionMap] width: " << width << ", height: " << height
-                                                         << ", resolution: " << resolution << " m/cell");
-    RCLCPP_INFO_STREAM(_logger, "[DirectionMap] origin.position (x,y,z): "
-                                    << origin_x << ", " << origin_y << ", " << origin_z);
-    RCLCPP_INFO_STREAM(_logger, "[DirectionMap] total_cells (width*height): " << total_cells
-                                                                              << "  data.size(): " << data_len);
-
-    RCLCPP_INFO_STREAM(_logger, "[DirectionMap] cell counts -> unknown: " << unknown_count
-                                                                          << ", free(0): " << free_count
-                                                                          << ", occupied(100): " << occupied_count
-                                                                          << ", direction_encoded(1..99): " << dir_encoded_count);
-
-    if (min_encoded <= 255 && max_encoded >= -255)
-    {
-      RCLCPP_INFO_STREAM(_logger, "[DirectionMap] encoded range (min..max): " << min_encoded << " .. " << max_encoded);
-    }
-
-    // print a small sample for quick inspection
-    std::ostringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < sample.size(); ++i)
-    {
-      if (i)
-        ss << ", ";
-      ss << sample[i];
-    }
-    ss << "]";
-    RCLCPP_INFO_STREAM(_logger, "[DirectionMap] first " << sample.size() << " cells: " << ss.str());
-
-    // sanity check: warn if sizes mismatch
-    if (total_cells != data_len)
-    {
-      RCLCPP_WARN_STREAM(_logger, "[DirectionMap] total_cells (" << total_cells
-                                                                 << ") != data.size() (" << data_len << ") -- map publisher may be malformed");
-    }
+    // ensure SearchInfo pointer updated
+    _search_info.direction_map = direction_map_;
   }
 
+  // Marker visualization: use the used message (downsampled if used)
   if (!heading_marker_pub_)
   {
     RCLCPP_WARN(_logger, "heading_marker_pub_ is null!");
@@ -446,22 +477,25 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
   visualization_msgs::msg::MarkerArray marker_array;
   const auto now = _clock->now();
 
-  const unsigned int W = msg->info.width;
-  const unsigned int H = msg->info.height;
-  const float res = msg->info.resolution;
-  const float ox = msg->info.origin.position.x;
-  const float oy = msg->info.origin.position.y;
-  const std::string &frame_id = msg->header.frame_id;
+  // choose which occupancy grid to read for visualization
+  const nav_msgs::msg::OccupancyGrid *used_grid = (do_downsample ? &ds_msg : msg.get());
+
+  const unsigned int W = used_grid->info.width;
+  const unsigned int H = used_grid->info.height;
+  const float res = static_cast<float>(used_grid->info.resolution);
+  const float ox = static_cast<float>(used_grid->info.origin.position.x);
+  const float oy = static_cast<float>(used_grid->info.origin.position.y);
+  const std::string &frame_id = used_grid->header.frame_id;
 
   int marker_id = 0;
-  unsigned int step = 32; // Only draw every 4th cell for speed
+  unsigned int step = 16; // draw every N cells to keep marker count reasonable
 
   for (unsigned int y = 0; y < H; y += step)
   {
     for (unsigned int x = 0; x < W; x += step)
     {
       unsigned int idx = y * W + x;
-      int v = static_cast<int>(msg->data[idx]);
+      int v = static_cast<int>(used_grid->data[idx]);
       int u = (v + 256) % 256;
 
       if (u < 1 || u > 99)
@@ -490,9 +524,9 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
       q.setRPY(0, 0, theta);
       m.pose.orientation = tf2::toMsg(q);
 
-      m.scale.x = 0.8;  // shaft length
-      m.scale.y = 0.08; // shaft diameter
-      m.scale.z = 0.08; // head diameter
+      m.scale.x = 0.8f;  // shaft length
+      m.scale.y = 0.08f; // shaft diameter
+      m.scale.z = 0.08f; // head diameter
 
       // Color: greenish
       m.color.r = 0.2f;
@@ -508,98 +542,93 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
   heading_marker_pub_->publish(marker_array);
   RCLCPP_INFO(_logger, "[DirectionMap] Published %zu heading markers", marker_array.markers.size());
 }
-  nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
-      const geometry_msgs::msg::PoseStamped &start,
-      const geometry_msgs::msg::PoseStamped &goal)
+
+nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
+  const geometry_msgs::msg::PoseStamped &start,
+  const geometry_msgs::msg::PoseStamped &goal)
+{
+  std::lock_guard<std::mutex> lock_reinit(_mutex);
+  steady_clock::time_point a = steady_clock::now();
+
+  std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(_costmap->getMutex()));
+
+  // Downsample costmap, if required
+  nav2_costmap_2d::Costmap2D * costmap = _costmap;
+  if (_costmap_downsampler) {
+    costmap = _costmap_downsampler->downsample(_downsampling_factor);
+    _collision_checker.setCostmap(costmap);
+  }
+
+  // Set collision checker and costmap information
+  _collision_checker.setFootprint(
+    _costmap_ros->getRobotFootprint(),
+    _costmap_ros->getUseRadius(),
+    findCircumscribedCost(_costmap_ros));
+  _a_star->setCollisionChecker(&_collision_checker);
+
+  // Set starting point, in A* bin search coordinates
+  unsigned int mx, my;
+  if (!costmap->worldToMap(start.pose.position.x, start.pose.position.y, mx, my)) {
+    throw std::runtime_error("Start pose is out of costmap!");
+  }
+
+  double orientation_bin = std::round(tf2::getYaw(start.pose.orientation) / _angle_bin_size);
+  while (orientation_bin < 0.0) {
+    orientation_bin += static_cast<float>(_angle_quantizations);
+  }
+  // This is needed to handle precision issues
+  if (orientation_bin >= static_cast<float>(_angle_quantizations)) {
+    orientation_bin -= static_cast<float>(_angle_quantizations);
+  }
+  _a_star->setStart(mx, my, static_cast<unsigned int>(orientation_bin));
+
+  // Set goal point, in A* bin search coordinates
+  if (!costmap->worldToMap(goal.pose.position.x, goal.pose.position.y, mx, my)) {
+    throw std::runtime_error("Goal pose is out of costmap!");
+  }
+  orientation_bin = std::round(tf2::getYaw(goal.pose.orientation) / _angle_bin_size);
+  while (orientation_bin < 0.0)
   {
-    std::lock_guard<std::mutex> lock_reinit(_mutex);
-    steady_clock::time_point a = steady_clock::now();
+    orientation_bin += static_cast<float>(_angle_quantizations);
+  }
+  // This is needed to handle precision issues
+  if (orientation_bin >= static_cast<float>(_angle_quantizations))
+  {
+    orientation_bin -= static_cast<float>(_angle_quantizations);
+  }
+  _a_star->setGoal(mx, my, static_cast<unsigned int>(orientation_bin));
 
-    std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(_costmap->getMutex()));
+  // Setup message
+  nav_msgs::msg::Path plan;
+  plan.header.stamp = _clock->now();
+  plan.header.frame_id = _global_frame;
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header = plan.header;
+  pose.pose.position.z = 0.0;
+  pose.pose.orientation.x = 0.0;
+  pose.pose.orientation.y = 0.0;
+  pose.pose.orientation.z = 0.0;
+  pose.pose.orientation.w = 1.0;
 
-    // Downsample costmap, if required
-    nav2_costmap_2d::Costmap2D *costmap = _costmap;
-    if (_costmap_downsampler)
+  // Compute plan
+  NodeHybrid::CoordinateVector path;
+  int num_iterations = 0;
+  std::string error;
+  try {
+    if (!_a_star->createPath(
+            path, num_iterations, _tolerance / static_cast<float>(costmap->getResolution())))
     {
-      costmap = _costmap_downsampler->downsample(_downsampling_factor);
-      _collision_checker.setCostmap(costmap);
-    }
-
-    // Set collision checker and costmap information
-    _collision_checker.setFootprint(
-        _costmap_ros->getRobotFootprint(),
-        _costmap_ros->getUseRadius(),
-        findCircumscribedCost(_costmap_ros));
-    _a_star->setCollisionChecker(&_collision_checker);
-
-    // Set starting point, in A* bin search coordinates
-    unsigned int mx, my;
-    if (!costmap->worldToMap(start.pose.position.x, start.pose.position.y, mx, my))
-    {
-      throw std::runtime_error("Start pose is out of costmap!");
-    }
-
-    double orientation_bin = std::round(tf2::getYaw(start.pose.orientation) / _angle_bin_size);
-    while (orientation_bin < 0.0)
-    {
-      orientation_bin += static_cast<float>(_angle_quantizations);
-    }
-    // This is needed to handle precision issues
-    if (orientation_bin >= static_cast<float>(_angle_quantizations))
-    {
-      orientation_bin -= static_cast<float>(_angle_quantizations);
-    }
-    _a_star->setStart(mx, my, static_cast<unsigned int>(orientation_bin));
-
-    // Set goal point, in A* bin search coordinates
-    if (!costmap->worldToMap(goal.pose.position.x, goal.pose.position.y, mx, my))
-    {
-      throw std::runtime_error("Goal pose is out of costmap!");
-    }
-    orientation_bin = std::round(tf2::getYaw(goal.pose.orientation) / _angle_bin_size);
-    while (orientation_bin < 0.0)
-    {
-      orientation_bin += static_cast<float>(_angle_quantizations);
-    }
-    // This is needed to handle precision issues
-    if (orientation_bin >= static_cast<float>(_angle_quantizations))
-    {
-      orientation_bin -= static_cast<float>(_angle_quantizations);
-    }
-    _a_star->setGoal(mx, my, static_cast<unsigned int>(orientation_bin));
-    // After successfully mapping goal pose into mx, my
-    // _search_info.goal_x = static_cast<float>(mx);
-    // _search_info.goal_y = static_cast<float>(my);
-
-    // Setup message
-    nav_msgs::msg::Path plan;
-    plan.header.stamp = _clock->now();
-    plan.header.frame_id = _global_frame;
-    geometry_msgs::msg::PoseStamped pose;
-    pose.header = plan.header;
-    pose.pose.position.z = 0.0;
-    pose.pose.orientation.x = 0.0;
-    pose.pose.orientation.y = 0.0;
-    pose.pose.orientation.z = 0.0;
-    pose.pose.orientation.w = 1.0;
-
-    // Compute plan Hbrid A*
-    NodeHybrid::CoordinateVector path;
-    int num_iterations = 0;
-    std::string error;
-    try
-    {
-      if (!_a_star->createPath(
-              path, num_iterations, _tolerance / static_cast<float>(costmap->getResolution())))
+      if (num_iterations < _a_star->getMaxIterations())
       {
-        if (num_iterations < _a_star->getMaxIterations())
-        {
-          error = std::string("no valid path found");
-        } else {
+        error = std::string("no valid path found");
+      }
+      else {
         error = std::string("exceeded maximum iterations");
       }
     }
-  } catch (const std::runtime_error & e) {
+  }
+  catch (const std::runtime_error &e)
+  {
     error = "invalid use: ";
     error += e.what();
   }
@@ -641,14 +670,16 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
 
   // Convert to world coordinates
   plan.poses.reserve(path.size());
-  for (int i = path.size() - 1; i >= 0; --i) {
+  for (int i = path.size() - 1; i >= 0; --i)
+  {
     pose.pose = getWorldCoords(path[i].x, path[i].y, costmap);
     pose.pose.orientation = getWorldOrientation(path[i].theta);
     plan.poses.push_back(pose);
   }
 
   // Publish raw path for debug
-  if (_raw_plan_publisher->get_subscription_count() > 0) {
+  if (_raw_plan_publisher->get_subscription_count() > 0)
+  {
     _raw_plan_publisher->publish(plan);
   }
 
@@ -669,9 +700,9 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
       NodeHybrid::neighbors_rejected_collision);
 
   RCLCPP_INFO(
-    _logger,
-    "%s: Successfully created plan in %.3f sec with %d iterations and %zu poses",
-    _name.c_str(), time_span.count(), num_iterations, plan.poses.size());
+      _logger,
+      "%s: Successfully created plan in %.3f sec with %d iterations and %zu poses",
+      _name.c_str(), time_span.count(), num_iterations, plan.poses.size());
 
   // Reset profiling counters after each plan
   NodeHybrid::nodes_expanded = 0;
@@ -680,22 +711,20 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
   NodeHybrid::neighbors_rejected_heading = 0;
   NodeHybrid::neighbors_rejected_collision = 0;
 
-
 #ifdef BENCHMARK_TESTING
-  std::cout << "It took " << time_span.count() * 1000 <<
-    " milliseconds with " << num_iterations << " iterations." << std::endl;
+  std::cout << "It took " << time_span.count() * 1000 << " milliseconds with " << num_iterations << " iterations." << std::endl;
 #endif
 
   // Smooth plan
-  if (_smoother && num_iterations > 1) {
+  if (_smoother && num_iterations > 1)
+  {
     _smoother->smooth(plan, costmap, time_remaining);
   }
 
 #ifdef BENCHMARK_TESTING
   steady_clock::time_point c = steady_clock::now();
   duration<double> time_span2 = duration_cast<duration<double>>(c - b);
-  std::cout << "It took " << time_span2.count() * 1000 <<
-    " milliseconds to smooth path." << std::endl;
+  std::cout << "It took " << time_span2.count() * 1000 << " milliseconds to smooth path." << std::endl;
 #endif
 
   return plan;
@@ -772,23 +801,13 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         reinit_a_star = true;
         _search_info.analytic_expansion_max_length =
             static_cast<float>(parameter.as_double()) / _costmap->getResolution();
-        // --- Direction-map knobs (live-tunable doubles) ---
+        // --- Direction-map
       }
-      // else if (name == _name + ".direction_heading_decay")
-      // {
-      //   direction_heading_decay_ = parameter.as_double();
-      //   _search_info.direction_heading_decay = direction_heading_decay_;
-      // }
       else if (name == _name + ".direction_heading_weight")
       {
         direction_heading_weight_ = parameter.as_double();
         _search_info.direction_heading_weight = direction_heading_weight_;
       }
-      // else if (name == _name + ".max_heading_deviation_rad")
-      // {
-      //  max_heading_deviation_rad_ = parameter.as_double();
-      // _search_info.max_heading_deviation_rad = max_heading_deviation_rad_;
-      // }
     }
     else if (type == ParameterType::PARAMETER_BOOL)
     {
@@ -822,7 +841,6 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
       {
         use_direction_map_ = parameter.as_bool();
         _search_info.use_direction_map = use_direction_map_;
-
         auto node = _node.lock();
         if (use_direction_map_)
         {
@@ -850,7 +868,23 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
         reinit_a_star = true;
         reinit_downsampler = true;
         _downsampling_factor = parameter.as_int();
+        // Update DirectionMap factor if used
+        if (_search_info.direction_map)
+        {
+          _search_info.direction_map->setDownsamplingFactor(_downsampling_factor);
+        }
+
+        // Reprocess cached direction map immediately (if available)
+        if (use_direction_map_ && last_direction_map_msg_)
+        {
+          RCLCPP_INFO(_logger,
+                      "[SmacPlannerHybrid] Downsampling factor updated to %d. "
+                      "Reprocessing cached direction_map now.",
+                      _downsampling_factor);
+          directionMapCallback(last_direction_map_msg_);
+        }
       }
+  
       else if (name == _name + ".max_iterations")
       {
         reinit_a_star = true;
@@ -915,64 +949,72 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
   }
 
   // Re-init if needed with mutex lock (to avoid re-init while creating a plan)
-  if (reinit_a_star || reinit_downsampler || reinit_collision_checker || reinit_smoother) {
+  if (reinit_a_star || reinit_downsampler || reinit_collision_checker || reinit_smoother)
+  {
     // convert to grid coordinates
-    if (!_downsample_costmap) {
+    if (!_downsample_costmap)
+    {
       _downsampling_factor = 1;
     }
     _search_info.minimum_turning_radius =
-      _minimum_turning_radius_global_coords / (_costmap->getResolution() * _downsampling_factor);
+        _minimum_turning_radius_global_coords / (_costmap->getResolution() * _downsampling_factor);
     _lookup_table_dim =
-      static_cast<float>(_lookup_table_size) /
-      static_cast<float>(_costmap->getResolution() * _downsampling_factor);
+        static_cast<float>(_lookup_table_size) /
+        static_cast<float>(_costmap->getResolution() * _downsampling_factor);
 
     // Make sure its a whole number
     _lookup_table_dim = static_cast<float>(static_cast<int>(_lookup_table_dim));
 
     // Make sure its an odd number
-    if (static_cast<int>(_lookup_table_dim) % 2 == 0) {
+    if (static_cast<int>(_lookup_table_dim) % 2 == 0)
+    {
       RCLCPP_INFO(
-        _logger,
-        "Even sized heuristic lookup table size set %f, increasing size by 1 to make odd",
-        _lookup_table_dim);
+          _logger,
+          "Even sized heuristic lookup table size set %f, increasing size by 1 to make odd",
+          _lookup_table_dim);
       _lookup_table_dim += 1.0;
     }
 
     auto node = _node.lock();
 
     // Re-Initialize A* template
-    if (reinit_a_star) {
+    if (reinit_a_star)
+    {
       _a_star = std::make_unique<AStarAlgorithm<NodeHybrid>>(_motion_model, _search_info);
       _a_star->initialize(
-        _allow_unknown,
-        _max_iterations,
-        _max_on_approach_iterations,
-        _max_planning_time,
-        _lookup_table_dim,
-        _angle_quantizations);
+          _allow_unknown,
+          _max_iterations,
+          _max_on_approach_iterations,
+          _max_planning_time,
+          _lookup_table_dim,
+          _angle_quantizations);
     }
 
     // Re-Initialize costmap downsampler
-    if (reinit_downsampler) {
-      if (_downsample_costmap && _downsampling_factor > 1) {
+    if (reinit_downsampler)
+    {
+      if (_downsample_costmap && _downsampling_factor > 1)
+      {
         std::string topic_name = "downsampled_costmap";
         _costmap_downsampler = std::make_unique<CostmapDownsampler>();
         _costmap_downsampler->on_configure(
-          node, _global_frame, topic_name, _costmap, _downsampling_factor);
+            node, _global_frame, topic_name, _costmap, _downsampling_factor);
       }
     }
 
     // Re-Initialize collision checker
-    if (reinit_collision_checker) {
+    if (reinit_collision_checker)
+    {
       _collision_checker = GridCollisionChecker(_costmap, _angle_quantizations, node);
       _collision_checker.setFootprint(
-        _costmap_ros->getRobotFootprint(),
-        _costmap_ros->getUseRadius(),
-        findCircumscribedCost(_costmap_ros));
+          _costmap_ros->getRobotFootprint(),
+          _costmap_ros->getUseRadius(),
+          findCircumscribedCost(_costmap_ros));
     }
 
     // Re-Initialize smoother
-    if (reinit_smoother) {
+    if (reinit_smoother)
+    {
       SmootherParams params;
       params.get(node, _name);
       _smoother = std::make_unique<Smoother>(params);
@@ -987,3 +1029,5 @@ SmacPlannerHybrid::dynamicParametersCallback(std::vector<rclcpp::Parameter> para
 
 #include "pluginlib/class_list_macros.hpp"
 PLUGINLIB_EXPORT_CLASS(nav2_smac_planner::SmacPlannerHybrid, nav2_core::GlobalPlanner)
+
+//ya
