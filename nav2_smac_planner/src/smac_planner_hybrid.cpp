@@ -319,130 +319,266 @@ void SmacPlannerHybrid::cleanup()
   _raw_plan_publisher.reset();
 }
 
+// void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+// {
+//    // Cache the incoming message for later reprocessing if parameter change
+//   last_direction_map_msg_ = msg;
+//   RCLCPP_INFO(_logger, "[DirectionMap] Directionmap callback ....Received map with size: %u x %u",
+//               msg->info.width, msg->info.height);
+
+//   // Prepare downsampled message (if we will do downsampling)
+//   const unsigned int factor = static_cast<unsigned int>(_downsampling_factor);
+//   const bool do_downsample = use_direction_map_ && _downsample_costmap && (factor > 1);
+
+//   nav_msgs::msg::OccupancyGrid ds_msg; // empty grid to hold downsampled map
+
+//   if (do_downsample) {
+//     // compute downsampled sizes
+//     const unsigned int W = msg->info.width;
+//     const unsigned int H = msg->info.height;
+//     const unsigned int newW = static_cast<unsigned int>(std::ceil(static_cast<float>(W) / static_cast<float>(factor)));
+//     const unsigned int newH = static_cast<unsigned int>(std::ceil(static_cast<float>(H) / static_cast<float>(factor)));
+
+//     // copy original and modify fields we need to change
+//     ds_msg = *msg;
+//     ds_msg.info.width = newW;
+//     ds_msg.info.height = newH;
+//     ds_msg.info.resolution = msg->info.resolution * static_cast<double>(factor);
+//     ds_msg.data.assign(newW * newH, static_cast<int8_t>(-1));
+
+//     // helpers for indexing
+//     auto in_index = [&](unsigned int ix, unsigned int iy) { return iy * W + ix; }; //original input grid
+//     auto out_index = [&](unsigned int ox, unsigned int oy) { return oy * newW + ox; }; //downsampled/output gridd
+
+
+//     // Loop through each cell in the downsampled (output) map,
+//     // ox, oy: output cell coordinates (x and y) in the downsampled grid
+//     for (unsigned int oy = 0; oy < newH; ++oy) {
+//       for (unsigned int ox = 0; ox < newW; ++ox) {
+//         int obstacle_count = 0;
+//         int free_count = 0;
+//         bool has_direction = false ;
+
+//         unsigned int x_start = ox * factor;
+//         unsigned int y_start = oy * factor;
+//         // Check the corresponding block in the original to detect obstacle or free cells..(bx,by:block offsets)
+//         //ix, iy — the input (original) grid cell coordinates
+//         for (unsigned int by = 0; by < factor; ++by) {
+//           unsigned int iy = y_start + by;
+//           if (iy >= H) break;
+
+//           for (unsigned int bx = 0; bx < factor; ++bx) {
+//             unsigned int ix = x_start + bx;
+//             if (ix >= W) break;
+
+//             int raw_value = static_cast<int>(msg->data[in_index(ix, iy)]);
+//             if (raw_value == 100) {
+//               ++obstacle_count;
+//             } else if (raw_value >= 1 && raw_value <= 99) {
+//               has_direction = true;
+//             } else if (raw_value == 0) {
+//               ++free_count;
+//             } else {
+//               // unknown (-1) -> ignored unless nothing else present
+//             }
+//           }
+//         }
+//         // Decide what value to assign to this downsampled cell
+//         int8_t output_raw_value = -1;
+//         if (obstacle_count > 0)
+//         {
+//           output_raw_value = 100;
+//         }
+//         else
+//         {
+//           //Use center cell value
+//           unsigned int center_ix = x_start + factor / 2;
+//           unsigned int center_iy = y_start + factor / 2;
+
+//           // Clamp to map bounds
+//           if (center_ix >= W)
+//             center_ix = W - 1;
+//           if (center_iy >= H)
+//             center_iy = H - 1;
+
+//           int center_val = static_cast<int>(msg->data[in_index(center_ix, center_iy)]);
+
+//           if (center_val == 100)
+//           {
+//             output_raw_value = 100;
+//           }
+//           else if (center_val >= 1 && center_val <= 99)
+//           {
+//             output_raw_value = static_cast<int8_t>(center_val);
+//           }
+//           else if (center_val == 0)
+//           {
+//             output_raw_value = 0;
+//           }
+//           else
+//           {
+//             output_raw_value = -1;
+//           }
+//         }
+//         //Store in downsampled map
+//         ds_msg.data[out_index(ox, oy)] = output_raw_value;
+//       }
+//     }
+
+//     // set header/time/frame as source
+//     ds_msg.header = msg->header;
+//     direction_map_->setGrid(ds_msg);
+//     RCLCPP_INFO(_logger, "[DirectionMap] downsampled direction map to %u x %u, res=%.3f",
+//                 ds_msg.info.width, ds_msg.info.height, ds_msg.info.resolution);
+//   } else {
+//     // no downsample: use original
+//     direction_map_->setGrid(*msg);
+//   }
+
+//   // At this point direction_map_ has been set (either with ds_msg or original)
+//   // Check alignment with planner active grid (resolution & origin)
+//   {
+//     const auto &used_info = do_downsample ? ds_msg.info : msg->info;
+
+//     const double dir_res = used_info.resolution;
+//     const double dir_ox = used_info.origin.position.x;
+//     const double dir_oy = used_info.origin.position.y;
+
+//     // planner active grid resolution (costmap resolution times downsampling factor used by planner)
+//     const double planner_res = _costmap->getResolution() * static_cast<double>(_downsampling_factor);
+//     const double planner_ox = _costmap->getOriginX();
+//     const double planner_oy = _costmap->getOriginY();
+
+//     const double eps = 1e-6;
+//     if (std::fabs(dir_res - planner_res) < eps &&
+//         std::fabs(dir_ox - planner_ox) < eps &&
+//         std::fabs(dir_oy - planner_oy) < eps)
+//     {
+//       _search_info.direction_map_aligned = true;
+//       RCLCPP_INFO(_logger, "[DirectionMap] aligned with planner grid (res %.6f m/cell)", dir_res);
+//     } else {
+//       _search_info.direction_map_aligned = false;
+//       RCLCPP_WARN(_logger,
+//         "[DirectionMap] NOT aligned: dir_res=%.6f origin=(%.3f,%.3f) planner_res=%.6f origin=(%.3f,%.3f)",
+//         dir_res, dir_ox, dir_oy, planner_res, planner_ox, planner_oy);
+//     }
+
+//     // ensure SearchInfo pointer updated
+//     _search_info.direction_map = direction_map_;
+//   }
+
+//   // Marker visualization: use the used message (downsampled if used)
+//   if (!heading_marker_pub_)
+//   {
+//     RCLCPP_WARN(_logger, "heading_marker_pub_ is null!");
+//     return;
+//   }
+
+//   visualization_msgs::msg::MarkerArray marker_array;
+//   const auto now = _clock->now();
+
+//   // choose which occupancy grid to read for visualization
+//   const nav_msgs::msg::OccupancyGrid *used_grid = (do_downsample ? &ds_msg : msg.get());
+
+//   const unsigned int W = used_grid->info.width;
+//   const unsigned int H = used_grid->info.height;
+//   const float res = static_cast<float>(used_grid->info.resolution);
+//   const float ox = static_cast<float>(used_grid->info.origin.position.x);
+//   const float oy = static_cast<float>(used_grid->info.origin.position.y);
+//   const std::string &frame_id = used_grid->header.frame_id;
+
+//   int marker_id = 0;
+//   unsigned int step = 16; // draw every N cells to keep marker count reasonable
+
+//   for (unsigned int y = 0; y < H; y += step)
+//   {
+//     for (unsigned int x = 0; x < W; x += step)
+//     {
+//       unsigned int idx = y * W + x;
+//       int v = static_cast<int>(used_grid->data[idx]);
+//       int u = (v + 256) % 256;
+
+//       if (u < 1 || u > 99)
+//       {
+//         continue; // skip if not a direction-encoded cell
+//       }
+
+//       float wx = ox + (x + 0.5f) * res;
+//       float wy = oy + (y + 0.5f) * res;
+//       float theta = (u / 100.0f) * 2.0f * M_PI;
+
+//       visualization_msgs::msg::Marker m;
+//       m.header.frame_id = frame_id;
+//       m.header.stamp = now;
+//       m.ns = "direction_map_arrows";
+//       m.id = marker_id++;
+//       m.type = visualization_msgs::msg::Marker::ARROW;
+//       m.action = visualization_msgs::msg::Marker::ADD;
+
+//       m.pose.position.x = wx;
+//       m.pose.position.y = wy;
+//       m.pose.position.z = 0.05;
+
+//       // Convert heading theta to quaternion
+//       tf2::Quaternion q;
+//       q.setRPY(0, 0, theta);
+//       m.pose.orientation = tf2::toMsg(q);
+
+//       m.scale.x = 0.8f;  // shaft length
+//       m.scale.y = 0.08f; // shaft diameter
+//       m.scale.z = 0.08f; // head diameter
+
+//       // Color: greenish
+//       m.color.r = 0.2f;
+//       m.color.g = 1.0f;
+//       m.color.b = 0.2f;
+//       m.color.a = 1.0f;
+
+//       m.lifetime = rclcpp::Duration::from_seconds(0.0); // persist
+//       marker_array.markers.push_back(m);
+//     }
+//   }
+
+//   heading_marker_pub_->publish(marker_array);
+//   RCLCPP_INFO(_logger, "[DirectionMap] Published %zu heading markers", marker_array.markers.size());
+// }
 void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 {
-   // Cache the incoming message for later reprocessing if parameter change
+  // Cache incoming message
   last_direction_map_msg_ = msg;
   RCLCPP_INFO(_logger, "[DirectionMap] Directionmap callback ....Received map with size: %u x %u",
               msg->info.width, msg->info.height);
 
-  // Prepare downsampled message (if we will do downsampling)
+  // Decide whether to downsample the incoming direction_map according to plugin params
   const unsigned int factor = static_cast<unsigned int>(_downsampling_factor);
   const bool do_downsample = use_direction_map_ && _downsample_costmap && (factor > 1);
 
-  nav_msgs::msg::OccupancyGrid ds_msg; // empty grid to hold downsampled map
-
-  if (do_downsample) {
-    // compute downsampled sizes
-    const unsigned int W = msg->info.width;
-    const unsigned int H = msg->info.height;
-    const unsigned int newW = static_cast<unsigned int>(std::ceil(static_cast<float>(W) / static_cast<float>(factor)));
-    const unsigned int newH = static_cast<unsigned int>(std::ceil(static_cast<float>(H) / static_cast<float>(factor)));
-
-    // copy original and modify fields we need to change
-    ds_msg = *msg;
-    ds_msg.info.width = newW;
-    ds_msg.info.height = newH;
-    ds_msg.info.resolution = msg->info.resolution * static_cast<double>(factor);
-    ds_msg.data.assign(newW * newH, static_cast<int8_t>(-1));
-
-    // helpers for indexing
-    auto in_index = [&](unsigned int ix, unsigned int iy) { return iy * W + ix; }; //original input grid
-    auto out_index = [&](unsigned int ox, unsigned int oy) { return oy * newW + ox; }; //downsampled/output gridd
-
-
-    // Loop through each cell in the downsampled (output) map,
-    // ox, oy: output cell coordinates (x and y) in the downsampled grid
-    for (unsigned int oy = 0; oy < newH; ++oy) {
-      for (unsigned int ox = 0; ox < newW; ++ox) {
-        int obstacle_count = 0;
-        int free_count = 0;
-        bool has_direction = false ;
-
-        unsigned int x_start = ox * factor;
-        unsigned int y_start = oy * factor;
-        // Check the corresponding block in the original to detect obstacle or free cells..(bx,by:block offsets)
-        //ix, iy — the input (original) grid cell coordinates
-        for (unsigned int by = 0; by < factor; ++by) {
-          unsigned int iy = y_start + by;
-          if (iy >= H) break;
-
-          for (unsigned int bx = 0; bx < factor; ++bx) {
-            unsigned int ix = x_start + bx;
-            if (ix >= W) break;
-
-            int raw_value = static_cast<int>(msg->data[in_index(ix, iy)]);
-            if (raw_value == 100) {
-              ++obstacle_count;
-            } else if (raw_value >= 1 && raw_value <= 99) {
-              has_direction = true;
-            } else if (raw_value == 0) {
-              ++free_count;
-            } else {
-              // unknown (-1) -> ignored unless nothing else present
-            }
-          }
-        }
-        // Decide what value to assign to this downsampled cell
-        int8_t output_raw_value = -1;
-        if (obstacle_count > 0)
-        {
-          output_raw_value = 100;
-        }
-        else
-        {
-          //Use center cell value
-          unsigned int center_ix = x_start + factor / 2;
-          unsigned int center_iy = y_start + factor / 2;
-
-          // Clamp to map bounds
-          if (center_ix >= W)
-            center_ix = W - 1;
-          if (center_iy >= H)
-            center_iy = H - 1;
-
-          int center_val = static_cast<int>(msg->data[in_index(center_ix, center_iy)]);
-
-          if (center_val == 100)
-          {
-            output_raw_value = 100;
-          }
-          else if (center_val >= 1 && center_val <= 99)
-          {
-            output_raw_value = static_cast<int8_t>(center_val);
-          }
-          else if (center_val == 0)
-          {
-            output_raw_value = 0;
-          }
-          else
-          {
-            output_raw_value = -1;
-          }
-        }
-        //Store in downsampled map
-        ds_msg.data[out_index(ox, oy)] = output_raw_value;
-      }
-    }
-
-    // set header/time/frame as source
-    ds_msg.header = msg->header;
-    direction_map_->setGrid(ds_msg);
-    RCLCPP_INFO(_logger, "[DirectionMap] downsampled direction map to %u x %u, res=%.3f",
-                ds_msg.info.width, ds_msg.info.height, ds_msg.info.resolution);
-  } else {
-    // no downsample: use original
-    direction_map_->setGrid(*msg);
+  // Ensure we have a DirectionMap instance when direction maps are enabled
+  if (use_direction_map_ && !direction_map_)
+  {
+    direction_map_ = std::make_shared<nav2_smac_planner::DirectionMap>();
+    _search_info.direction_map = direction_map_;
   }
 
-  // At this point direction_map_ has been set (either with ds_msg or original)
-  // Check alignment with planner active grid (resolution & origin)
+  // Set the DirectionMap (either downsampled or original). The DirectionMap handles internal downsampling.
+  if (do_downsample)
   {
-    const auto &used_info = do_downsample ? ds_msg.info : msg->info;
+    // Use the overloaded setGrid(msg, factor) — default policy is center / mean inside DirectionMap (no extra param)
+    direction_map_->setGrid(*msg, static_cast<int>(factor));
+    RCLCPP_INFO(_logger, "[DirectionMap] Direction map set with downsampling factor %u", factor);
+  }
+  else
+  {
+    direction_map_->setGrid(*msg);
+    RCLCPP_INFO(_logger, "[DirectionMap] Direction map set without downsampling");
+  }
 
-    const double dir_res = used_info.resolution;
-    const double dir_ox = used_info.origin.position.x;
-    const double dir_oy = used_info.origin.position.y;
+  // Alignment check: compare the direction_map's metadata against planner active grid
+  {
+    // read values from DirectionMap (thread-safe getters)
+    const double dir_res = direction_map_->getResolution();
+    const double dir_ox = direction_map_->getOriginX();
+    const double dir_oy = direction_map_->getOriginY();
 
     // planner active grid resolution (costmap resolution times downsampling factor used by planner)
     const double planner_res = _costmap->getResolution() * static_cast<double>(_downsampling_factor);
@@ -456,18 +592,20 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
     {
       _search_info.direction_map_aligned = true;
       RCLCPP_INFO(_logger, "[DirectionMap] aligned with planner grid (res %.6f m/cell)", dir_res);
-    } else {
+    }
+    else
+    {
       _search_info.direction_map_aligned = false;
       RCLCPP_WARN(_logger,
-        "[DirectionMap] NOT aligned: dir_res=%.6f origin=(%.3f,%.3f) planner_res=%.6f origin=(%.3f,%.3f)",
-        dir_res, dir_ox, dir_oy, planner_res, planner_ox, planner_oy);
+                  "[DirectionMap] NOT aligned: dir_res=%.6f origin=(%.3f,%.3f) planner_res=%.6f origin=(%.3f,%.3f)",
+                  dir_res, dir_ox, dir_oy, planner_res, planner_ox, planner_oy);
     }
 
-    // ensure SearchInfo pointer updated
+    // make sure search_info pointer updated
     _search_info.direction_map = direction_map_;
   }
 
-  // Marker visualization: use the used message (downsampled if used)
+  // Marker visualization: publish arrows using the (possibly downsampled) DirectionMap contents
   if (!heading_marker_pub_)
   {
     RCLCPP_WARN(_logger, "heading_marker_pub_ is null!");
@@ -477,35 +615,44 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
   visualization_msgs::msg::MarkerArray marker_array;
   const auto now = _clock->now();
 
-  // choose which occupancy grid to read for visualization
-  const nav_msgs::msg::OccupancyGrid *used_grid = (do_downsample ? &ds_msg : msg.get());
+  // Read visualization properties from DirectionMap
+  const unsigned int W = direction_map_->getSizeInCellsX();
+  const unsigned int H = direction_map_->getSizeInCellsY();
+  const float res = static_cast<float>(direction_map_->getResolution());
+  const float ox = static_cast<float>(direction_map_->getOriginX());
+  const float oy = static_cast<float>(direction_map_->getOriginY());
+  const std::string frame_id = direction_map_->frameId();
+  const auto &data = direction_map_->getData(); // const ref to underlying vector
 
-  const unsigned int W = used_grid->info.width;
-  const unsigned int H = used_grid->info.height;
-  const float res = static_cast<float>(used_grid->info.resolution);
-  const float ox = static_cast<float>(used_grid->info.origin.position.x);
-  const float oy = static_cast<float>(used_grid->info.origin.position.y);
-  const std::string &frame_id = used_grid->header.frame_id;
+  // Compute step (cells) and arrow scales in world meters.
+  // We pick a desired world spacing (approx) so marker density is reasonably similar
+  // regardless of downsampling. Base cell step is 16 for full-res; scale inversely with factor.
+  const unsigned int factor_used = static_cast<unsigned int>(std::max(1, direction_map_->getDownsamplingFactor()));
+  unsigned int step = static_cast<unsigned int>(std::max(1u, static_cast<unsigned int>(std::round(16.0 / static_cast<double>(factor_used)))));
+  // // Arrow length ~ 0.8 * cell_size (in meters), but not too small
+  const float arrow_length = std::max(0.50f, 1.6f * res);
+  const float shaft_diam = std::max(0.09f, 0.16f * res);
+  const float head_diam = std::max(0.09f, 0.24f * res);
 
   int marker_id = 0;
-  unsigned int step = 16; // draw every N cells to keep marker count reasonable
-
   for (unsigned int y = 0; y < H; y += step)
   {
     for (unsigned int x = 0; x < W; x += step)
     {
       unsigned int idx = y * W + x;
-      int v = static_cast<int>(used_grid->data[idx]);
-      int u = (v + 256) % 256;
+      if (idx >= data.size()) continue;
+
+      int v = static_cast<int>(data[idx]);
+      int u = (v + 256) % 256; // handle signed int8_t
 
       if (u < 1 || u > 99)
       {
-        continue; // skip if not a direction-encoded cell
+        continue; // skip non-direction cells
       }
 
       float wx = ox + (x + 0.5f) * res;
       float wy = oy + (y + 0.5f) * res;
-      float theta = (u / 100.0f) * 2.0f * M_PI;
+      float theta = (static_cast<float>(u) / 100.0f) * 2.0f * M_PI;
 
       visualization_msgs::msg::Marker m;
       m.header.frame_id = frame_id;
@@ -524,9 +671,11 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
       q.setRPY(0, 0, theta);
       m.pose.orientation = tf2::toMsg(q);
 
-      m.scale.x = 0.8f;  // shaft length
-      m.scale.y = 0.08f; // shaft diameter
-      m.scale.z = 0.08f; // head diameter
+      // Arrow scaling in meters
+      m.scale.x = arrow_length;  // shaft length
+      m.scale.y = shaft_diam;    // shaft diameter
+      m.scale.z = head_diam;     // head diameter
+
 
       // Color: greenish
       m.color.r = 0.2f;
@@ -534,13 +683,38 @@ void SmacPlannerHybrid::directionMapCallback(const nav_msgs::msg::OccupancyGrid:
       m.color.b = 0.2f;
       m.color.a = 1.0f;
 
-      m.lifetime = rclcpp::Duration::from_seconds(0.0); // persist
+      m.lifetime = rclcpp::Duration::from_seconds(0.0); // persist until explicitly deleted
       marker_array.markers.push_back(m);
     }
   }
 
+  // Publish the markers
   heading_marker_pub_->publish(marker_array);
-  RCLCPP_INFO(_logger, "[DirectionMap] Published %zu heading markers", marker_array.markers.size());
+  RCLCPP_INFO(_logger, "[DirectionMap] Published %zu heading markers (new)", marker_array.markers.size());
+
+  // Delete leftover markers from previous publish (avoid ghost arrows).
+  // We rely on last_heading_marker_count_ (member added in header). If it is larger than current,
+  // publish DELETE actions for remaining ids.
+  const unsigned int new_count = static_cast<unsigned int>(marker_array.markers.size());
+  if (last_heading_marker_count_ > new_count)
+  {
+    visualization_msgs::msg::MarkerArray del_array;
+    for (unsigned int id = new_count; id < last_heading_marker_count_; ++id)
+    {
+      visualization_msgs::msg::Marker dm;
+      dm.header.frame_id = frame_id;
+      dm.header.stamp = now;
+      dm.ns = "direction_map_arrows";
+      dm.id = static_cast<int>(id);
+      dm.action = visualization_msgs::msg::Marker::DELETE;
+      del_array.markers.push_back(dm);
+    }
+    heading_marker_pub_->publish(del_array);
+    RCLCPP_DEBUG(_logger, "[DirectionMap] Deleted %zu stale markers", del_array.markers.size());
+  }
+
+  last_heading_marker_count_ = new_count;
+  RCLCPP_INFO(_logger, "[DirectionMap] marker set complete (total %u)", last_heading_marker_count_);
 }
 
 nav_msgs::msg::Path SmacPlannerHybrid::createPlan(
