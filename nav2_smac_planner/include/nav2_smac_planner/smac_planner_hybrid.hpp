@@ -135,6 +135,9 @@ protected:
   bool use_direction_map_{false};
   double direction_attract_weight_{0.0};
   double direction_heading_weight_{0.0};
+
+  unsigned int last_heading_marker_count_{0};
+
   // double direction_heading_decay_{0.0};
   // double max_heading_deviation_rad_;
   // store last raw direction map message so we can reprocess on param change
